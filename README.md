@@ -96,7 +96,7 @@ doimiy fayl ham, fon jarayoni ham yo'q, shuning uchun u yerda:
 Qadamlar:
 
 1. [vercel.com/new](https://vercel.com/new) → GitHub'dagi shu repozitoriyni tanlang → **Deploy**
-   (Framework: Other; build buyrug'i kerak emas).
+   (sozlamalarga tegmang — Vercel o'zi "Node" deb taniydi).
 2. Loyiha → **Storage** → **Create Database** → **Upstash for Redis** → region: Frankfurt →
    loyihaga ulang. (`KV_REST_API_URL` va `KV_REST_API_TOKEN` o'zi qo'shiladi.)
 3. Loyiha → **Settings → Environment Variables** → `ADMIN_PASSWORD` = o'zingizning parolingiz.
@@ -113,9 +113,8 @@ uchun esa admin parol kerak. Kalit va tokenlar brauzerga hech qachon berilmaydi.
 ## Tuzilma
 
 ```
-server.js         HTTP server + API (kompyuterda) va so'rov ishlovchisi (Vercel'da)
-api/index.js      Vercel funksiyasi (server.js ga ulanadi)
-vercel.json       Vercel sozlamalari (region, cron, /api yo'naltirish)
+server.js         HTTP server + API (kompyuterda); Vercel'da shu fayl funksiya sifatida ishlaydi
+vercel.json       Vercel sozlamalari (region, kunlik cron)
 lib/pbx.js        OnlinePBX API klienti
 lib/amo.js        amoCRM API klienti
 lib/sync.js       sinxronizatsiya (fon jadvali yoki so'rov bo'yicha)

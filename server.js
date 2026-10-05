@@ -431,6 +431,11 @@ function serveStatic(req, res, url) {
   } catch {
     throw new HttpError(400, "Manzil noto'g'ri");
   }
+  // Vercel'da public/ fayllarini CDN beradi; funksiyaga faqat "/" keladi — uni index.html ga yo'naltiramiz
+  if (db.SERVERLESS && p === '/') {
+    res.writeHead(302, { Location: '/index.html' + url.search, 'Cache-Control': 'no-store' });
+    return res.end();
+  }
   if (p === '/') p = '/index.html';
   const file = path.normalize(path.join(PUBLIC, p));
   if (!file.startsWith(PUBLIC + path.sep) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
@@ -506,4 +511,5 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { server, handler, applySettings, loginFails };
+// Vercel bu faylni kirish nuqtasi sifatida ishlatadi va asosiy eksport funksiya bo'lishini talab qiladi
+module.exports = Object.assign(handler, { server, handler, applySettings, loginFails });
