@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Uz-Grow — Sotuv bo'limi KPI</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%233ddc6a' d='M16 30C16 18 22 8 30 4c-2 12-6 22-14 26zM16 30C16 21 11 13 3 10c1 10 5 17 13 20z'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <nav class="topnav" id="topnav">
+    <div class="nav-links">
+      <a href="#/" data-view="dashboard">Dashboard</a>
+      <a href="#/reyting" data-view="rating">Reyting</a>
+      <a href="#/kiritish" data-view="entries">Natija kiritish</a>
+      <a href="#/xodimlar" data-view="employees">Xodimlar</a>
+      <a href="#/sozlamalar" data-view="settings">Sozlamalar</a>
+    </div>
+    <div class="nav-actions">
+      <span class="sync-dot" id="syncDot" title="Integratsiya holati"></span>
+      <button class="btn ghost sm" id="tvBtn" title="To'liq ekran (TV rejim)">TV rejim</button>
+      <button class="btn ghost sm" id="authBtn">Kirish</button>
+    </div>
+  </nav>
+  <main id="view"></main>
+  <div class="modal" id="modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true">
+      <button class="modal-x" id="modalX" aria-label="Yopish">×</button>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+  <div class="toast" id="toast" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>

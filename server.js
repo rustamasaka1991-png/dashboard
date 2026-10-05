@@ -1,0 +1,327 @@
+'use strict';
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+// --- .env (qo'shimcha kutubxonasiz) ---
+(function loadEnv() {
+  const file = path.join(__dirname, '.env');
+  if (!fs.existsSync(file)) return;
+  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/i);
+    if (!m || line.trim().startsWith('#')) continue;
+    if (process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+  }
+})();
+
+const db = require('./lib/db');
+const D = require('./lib/dates');
+const stats = require('./lib/stats');
+const sync = require('./lib/sync');
+const pbx = require('./lib/pbx');
+const amo = require('./lib/amo');
+
+const PORT = Number(process.env.PORT) || 3000;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
+const PUBLIC = path.join(__dirname, 'public');
+const MAX_BODY = 3 * 1024 * 1024;
+
+const adminToken = crypto.createHash('sha256').update('uzgrow-dashboard:' + ADMIN_PASSWORD).digest('hex');
+
+// ---------- yordamchilar ----------
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+function send(res, status, data) {
+  const body = JSON.stringify(data);
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(body);
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX_BODY) {
+        reject(new HttpError(413, "So'rov juda katta"));
+        req.destroy();
+      } else chunks.push(c);
+    });
+    req.on('end', () => {
+      if (!chunks.length) return resolve({});
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      } catch {
+        reject(new HttpError(400, "JSON noto'g'ri"));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function isAdmin(req) {
+  const h = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (h.length !== adminToken.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(h), Buffer.from(adminToken));
+}
+
+function requireAdmin(req) {
+  if (!isAdmin(req)) throw new HttpError(401, 'Admin sifatida kiring');
+}
+
+const str = (v, max = 200) => String(v ?? '').trim().slice(0, max);
+const optNum = (v) => (v === '' || v === null || v === undefined || !Number.isFinite(Number(v)) ? undefined : Number(v));
+
+function cleanEmployee(body, existing = {}) {
+  const e = { ...existing };
+  if (body.name !== undefined) e.name = str(body.name, 80);
+  if (body.role !== undefined) e.role = str(body.role, 80);
+  if (body.photo !== undefined) {
+    const p = String(body.photo || '');
+    if (p && !/^data:image\/(png|jpe?g|webp|gif);base64,/.test(p) && !/^https?:\/\//.test(p)) throw new HttpError(400, 'Rasm formati noto\'g\'ri');
+    if (p.length > 600000) throw new HttpError(400, 'Rasm juda katta');
+    e.photo = p;
+  }
+  if (body.extensions !== undefined) {
+    const list = Array.isArray(body.extensions) ? body.extensions : String(body.extensions).split(/[,\s;]+/);
+    e.extensions = [...new Set(list.map((x) => str(x, 30)).filter(Boolean))];
+  }
+  if (body.amoUserId !== undefined) e.amoUserId = str(body.amoUserId, 30);
+  if (body.active !== undefined) e.active = Boolean(body.active);
+  if (!e.name) throw new HttpError(400, 'Xodim ismi kerak');
+  return e;
+}
+
+function publicSettings(settings) {
+  const s = JSON.parse(JSON.stringify(settings));
+  const p = pbx.cfgFrom(settings);
+  const a = amo.cfgFrom(settings);
+  s.pbx = {
+    domain: p.domain, baseUrl: p.baseUrl, apiKey: '', hasApiKey: Boolean(p.apiKey),
+    fromEnv: Boolean(process.env.PBX_API_KEY || process.env.PBX_DOMAIN),
+  };
+  s.amo = {
+    subdomain: a.subdomain, baseDomain: a.baseDomain, pipelineId: a.pipelineId, wonStatusId: a.wonStatusId,
+    token: '', hasToken: Boolean(a.token), fromEnv: Boolean(process.env.AMO_TOKEN || process.env.AMO_SUBDOMAIN),
+  };
+  return s;
+}
+
+function applySettings(current, body) {
+  const s = JSON.parse(JSON.stringify(current));
+  for (const k of ['companyName', 'companyTagline', 'title', 'subtitle', 'currency', 'dailyBonus', 'dailyBonusText', 'monthlyBonusText']) {
+    if (body[k] !== undefined) s[k] = str(body[k], 200);
+  }
+  for (const k of ['workDaysPerMonth', 'workDaysPerWeek', 'scoreCap', 'minTalkSec', 'syncMinutes']) {
+    const v = optNum(body[k]);
+    if (v !== undefined && v >= 0) s[k] = v;
+  }
+  if (Array.isArray(body.daysOff)) s.daysOff = body.daysOff.map(Number).filter((d) => d >= 0 && d <= 6);
+  if (['all', 'outbound', 'inbound'].includes(body.callDirection)) s.callDirection = body.callDirection;
+  if (['manual', 'auto'].includes(body.conversionSource)) s.conversionSource = body.conversionSource;
+  for (const group of ['plans', 'weights']) {
+    if (body[group] && typeof body[group] === 'object') {
+      for (const k of stats.KPIS) {
+        const v = optNum(body[group][k]);
+        if (v !== undefined && v >= 0) s[group][k] = v;
+      }
+    }
+  }
+  if (body.pbx) {
+    if (body.pbx.domain !== undefined) s.pbx.domain = str(body.pbx.domain, 100).replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    if (body.pbx.baseUrl) s.pbx.baseUrl = str(body.pbx.baseUrl, 200);
+    if (body.pbx.apiKey) s.pbx.apiKey = str(body.pbx.apiKey, 300);
+    if (body.pbx.clearApiKey) s.pbx.apiKey = '';
+  }
+  if (body.amo) {
+    if (body.amo.subdomain !== undefined) s.amo.subdomain = str(body.amo.subdomain, 100).replace(/^https?:\/\//, '').replace(/\..*$/, '');
+    if (body.amo.baseDomain) s.amo.baseDomain = str(body.amo.baseDomain, 50);
+    if (body.amo.pipelineId !== undefined) s.amo.pipelineId = str(body.amo.pipelineId, 30);
+    const ws = optNum(body.amo.wonStatusId);
+    if (ws) s.amo.wonStatusId = ws;
+    if (body.amo.token) s.amo.token = str(body.amo.token, 4000);
+    if (body.amo.clearToken) s.amo.token = '';
+  }
+  return s;
+}
+
+// ---------- API ----------
+async function api(req, res, url) {
+  const state = db.get();
+  const route = `${req.method} ${url.pathname}`;
+  const q = Object.fromEntries(url.searchParams);
+
+  if (route === 'POST /api/login') {
+    const body = await readBody(req);
+    const ok = String(body.password || '') === ADMIN_PASSWORD;
+    if (!ok) throw new HttpError(401, "Parol noto'g'ri");
+    return send(res, 200, { token: adminToken });
+  }
+  if (route === 'GET /api/me') return send(res, 200, { admin: isAdmin(req) });
+
+  if (route === 'GET /api/dashboard') {
+    const ids = q.ids ? q.ids.split(',').filter(Boolean) : null;
+    const data = stats.dashboard(state, { date: q.date, period: q.period, from: q.from, to: q.to, ids });
+    return send(res, 200, {
+      ...data,
+      today: D.today(),
+      settings: publicSettings(state.settings),
+      sync: { ...sync.status, pbx: pbx.isConfigured(state.settings), amo: amo.isConfigured(state.settings) },
+    });
+  }
+
+  if (route === 'GET /api/settings') return send(res, 200, publicSettings(state.settings));
+  if (route === 'PUT /api/settings') {
+    requireAdmin(req);
+    state.settings = applySettings(state.settings, await readBody(req));
+    db.saveNow();
+    sync.startScheduler();
+    return send(res, 200, publicSettings(state.settings));
+  }
+
+  if (route === 'GET /api/employees') {
+    const admin = isAdmin(req);
+    return send(res, 200, state.employees.map((e) => (admin ? e : { id: e.id, name: e.name, role: e.role, photo: e.photo, active: e.active })));
+  }
+  if (route === 'POST /api/employees') {
+    requireAdmin(req);
+    const e = cleanEmployee(await readBody(req), { id: db.newId(), extensions: [], amoUserId: '', photo: '', role: 'Sotuv menejer', active: true, createdAt: new Date().toISOString() });
+    state.employees.push(e);
+    db.saveNow();
+    return send(res, 201, e);
+  }
+  const empMatch = url.pathname.match(/^\/api\/employees\/([a-z0-9]+)$/);
+  if (empMatch) {
+    requireAdmin(req);
+    const idx = state.employees.findIndex((e) => e.id === empMatch[1]);
+    if (idx < 0) throw new HttpError(404, 'Xodim topilmadi');
+    if (req.method === 'PUT') {
+      state.employees[idx] = cleanEmployee(await readBody(req), state.employees[idx]);
+      db.saveNow();
+      return send(res, 200, state.employees[idx]);
+    }
+    if (req.method === 'DELETE') {
+      const [removed] = state.employees.splice(idx, 1);
+      if (q.purge === '1') {
+        for (const bucket of [state.entries, state.auto]) for (const d of Object.keys(bucket)) delete bucket[d][removed.id];
+      }
+      db.saveNow();
+      return send(res, 200, { ok: true });
+    }
+  }
+
+  if (route === 'GET /api/entries') {
+    const date = D.isDate(q.date) ? q.date : D.today();
+    return send(res, 200, {
+      date,
+      rows: state.employees.map((e) => ({
+        employeeId: e.id,
+        name: e.name,
+        active: e.active !== false,
+        manual: state.entries[date]?.[e.id] || {},
+        auto: state.auto[date]?.[e.id] || {},
+        values: stats.dayValues(state, date, e.id),
+      })),
+    });
+  }
+  if (route === 'POST /api/entries') {
+    requireAdmin(req);
+    const body = await readBody(req);
+    if (!D.isDate(body.date)) throw new HttpError(400, 'Sana noto\'g\'ri');
+    const fields = ['script', 'conversion', 'sales', 'deals', 'calls', 'talkMin'];
+    for (const row of body.rows || []) {
+      if (!state.employees.some((e) => e.id === row.employeeId)) continue;
+      const cur = { ...(state.entries[body.date]?.[row.employeeId] || {}) };
+      for (const f of fields) {
+        if (!(f in row)) continue;
+        const v = optNum(row[f]);
+        if (v === undefined || v < 0) delete cur[f];
+        else cur[f] = v;
+      }
+      state.entries[body.date] ??= {};
+      if (Object.keys(cur).length) state.entries[body.date][row.employeeId] = cur;
+      else delete state.entries[body.date][row.employeeId];
+    }
+    db.saveNow();
+    return send(res, 200, { ok: true });
+  }
+
+  if (route === 'POST /api/sync') {
+    requireAdmin(req);
+    const body = await readBody(req);
+    const to = D.isDate(body.to) ? body.to : D.today();
+    const from = D.isDate(body.from) ? body.from : to;
+    if (from > to) throw new HttpError(400, 'Oraliq noto\'g\'ri');
+    if (D.eachDay(from, to).length > 400) throw new HttpError(400, 'Maksimal oraliq 400 kun');
+    return send(res, 200, await sync.syncRange(from, to));
+  }
+  if (route === 'GET /api/sync') return send(res, 200, sync.status);
+
+  if (route === 'POST /api/test/pbx') {
+    requireAdmin(req);
+    const t = D.today();
+    const calls = await pbx.fetchCalls(state.settings, D.dayStartUnix(t), D.dayStartUnix(t) + 86400);
+    const numbers = {};
+    for (const c of calls) for (const n of pbx.callNumbers(c)) if (n.length <= 6) numbers[n] = (numbers[n] || 0) + 1;
+    return send(res, 200, { ok: true, todayCalls: calls.length, internalNumbers: numbers, sample: calls[0] || null });
+  }
+  if (route === 'POST /api/test/amo') {
+    requireAdmin(req);
+    const [users, pipelines] = await Promise.all([amo.users(state.settings), amo.pipelines(state.settings)]);
+    return send(res, 200, { ok: true, users, pipelines });
+  }
+
+  throw new HttpError(404, 'Topilmadi');
+}
+
+// ---------- statik fayllar ----------
+const TYPES = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.webp': 'image/webp', '.jpg': 'image/jpeg' };
+
+function serveStatic(req, res, url) {
+  let p = decodeURIComponent(url.pathname);
+  if (p === '/') p = '/index.html';
+  const file = path.normalize(path.join(PUBLIC, p));
+  if (!file.startsWith(PUBLIC + path.sep) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('404');
+  }
+  res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+  fs.createReadStream(file).pipe(res);
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://localhost');
+  try {
+    if (url.pathname.startsWith('/api/')) await api(req, res, url);
+    else serveStatic(req, res, url);
+  } catch (err) {
+    const status = err.status || (/sozlanmagan/.test(err.message) ? 400 : 502);
+    if (!err.status) console.error('[api]', req.method, url.pathname, err.message);
+    if (!res.headersSent) send(res, status, { error: err.message });
+  }
+});
+
+if (require.main === module) {
+  db.load();
+  if (ADMIN_PASSWORD === 'admin') console.warn('DIQQAT: ADMIN_PASSWORD o\'rnatilmagan, vaqtinchalik parol "admin". .env faylida o\'zgartiring!');
+  server.listen(PORT, () => {
+    console.log(`Uz-Grow dashboard: http://localhost:${PORT}`);
+    sync.startScheduler();
+  });
+  const shutdown = () => {
+    db.saveNow();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
+
+module.exports = { server, applySettings };

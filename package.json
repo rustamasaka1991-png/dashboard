@@ -1,0 +1,15 @@
+{
+  "name": "uzgrow-sales-dashboard",
+  "version": "1.0.0",
+  "description": "Uz-Grow sotuv bo'limi KPI dashboard (OnlinePBX + amoCRM)",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "demo": "node scripts/demo.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
