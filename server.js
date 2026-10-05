@@ -1,5 +1,10 @@
 'use strict';
 
+if (Number(process.versions.node.split('.')[0]) < 18) {
+  console.error(`XATO: Node.js 18 yoki undan yangi versiya kerak (sizda ${process.version}). https://nodejs.org dan LTS versiyani o'rnating.`);
+  process.exit(1);
+}
+
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -312,8 +317,22 @@ const server = http.createServer(async (req, res) => {
 if (require.main === module) {
   db.load();
   if (ADMIN_PASSWORD === 'admin') console.warn('DIQQAT: ADMIN_PASSWORD o\'rnatilmagan, vaqtinchalik parol "admin". .env faylida o\'zgartiring!');
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`XATO: ${PORT}-port band. Dastur allaqachon ochiq bo'lishi mumkin — brauzerda http://localhost:${PORT} ni oching yoki .env da PORT ni o'zgartiring.`);
+    } else {
+      console.error('Serverni ishga tushirib bo\'lmadi:', err.message);
+    }
+    process.exit(1);
+  });
   server.listen(PORT, () => {
-    console.log(`Uz-Grow dashboard: http://localhost:${PORT}`);
+    const url = `http://localhost:${PORT}`;
+    console.log(`Uz-Grow dashboard ishga tushdi: ${url}`);
+    console.log('To\'xtatish uchun shu oynani yoping (yoki Ctrl+C).');
+    if (process.env.OPEN_BROWSER === '1') {
+      const cmd = process.platform === 'win32' ? `start "" "${url}"` : process.platform === 'darwin' ? `open "${url}"` : `xdg-open "${url}"`;
+      require('child_process').exec(cmd, () => {});
+    }
     sync.startScheduler();
   });
   const shutdown = () => {

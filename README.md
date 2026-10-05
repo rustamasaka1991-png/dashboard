@@ -14,7 +14,15 @@ Sotuv menejerlarining kunlik / haftalik / oylik / yillik KPI natijalari va reyti
 
 ## Ishga tushirish
 
-Node.js 18+ kerak, boshqa kutubxona o'rnatish shart emas.
+1. [Node.js](https://nodejs.org) ni o'rnating ("LTS" versiya). Boshqa hech narsa kerak emas.
+2. **Windows:** papkadagi `start.bat` faylini ikki marta bosing.
+   **macOS:** `start.command` faylini ikki marta bosing.
+3. Brauzer o'zi ochiladi: http://localhost:3000 . Admin parol (birinchi marta): `admin` —
+   `.env` faylida `ADMIN_PASSWORD` ni o'zgartiring.
+
+Qora oyna (terminal) ochiq turganda dashboard ishlaydi; uni yopsangiz, dashboard to'xtaydi.
+
+Terminal orqali:
 
 ```bash
 cp .env.example .env      # ADMIN_PASSWORD, PBX_API_KEY va h.k. ni yozing
