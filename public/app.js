@@ -4,7 +4,7 @@
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const TZ = 'Asia/Tashkent';
+let tzOffsetH = 5; // kompaniya vaqt zonasi (serverdan keladi: TZ_OFFSET_HOURS)
 const MONTHS = ['YANVAR', 'FEVRAL', 'MART', 'APREL', 'MAY', 'IYUN', 'IYUL', 'AVGUST', 'SENTABR', 'OKTABR', 'NOYABR', 'DEKABR'];
 const WEEKDAYS = ['YAKSHANBA', 'DUSHANBA', 'SESHANBA', 'CHORSHANBA', 'PAYSHANBA', 'JUMA', 'SHANBA'];
 const PERIOD_LABEL = { week: 'HAFTALIK', month: 'OYLIK', year: 'YILLIK', custom: 'ORALIQ' };
@@ -12,6 +12,7 @@ const PERIOD_BTN = { week: 'Hafta', month: 'Oy', year: 'Yil', custom: 'Oraliq' }
 
 let token = localStorage.getItem('uzg.token') || '';
 let isAdmin = false;
+let defaultPassword = false;
 let employeesCache = [];
 let refreshTimer = null;
 const ui = Object.assign({ period: 'month', date: '', from: '', to: '', ids: [], sort: 'score' }, safeJson(localStorage.getItem('uzg.ui')));
@@ -49,11 +50,12 @@ function toast(msg, err = false) {
   toast.t = setTimeout(() => (t.hidden = true), err ? 6000 : 2800);
 }
 
-function nowParts() {
-  const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', weekday: 'short', hour12: false })
-    .formatToParts(new Date()).map((x) => [x.type, x.value]));
-  return { date: `${p.year}-${p.month}-${p.day}`, time: `${p.hour === '24' ? '00' : p.hour}:${p.minute}` };
+// Vaqt belgisi (ms yoki ISO satr) -> kompaniya vaqt zonasidagi sana va soat
+function localParts(t = Date.now()) {
+  const iso = new Date(new Date(t).getTime() + tzOffsetH * 36e5).toISOString();
+  return { date: iso.slice(0, 10), time: iso.slice(11, 16) };
 }
+const nowParts = () => localParts();
 const todayStr = () => nowParts().date;
 function addDays(d, n) { return new Date(Date.parse(d + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10); }
 function longDate(d) {
@@ -65,7 +67,7 @@ const shortDate = (d) => d.slice(8, 10) + '.' + d.slice(5, 7) + '.' + d.slice(0,
 const intFmt = (n) => Math.round(n).toLocaleString('ru-RU').replace(/ /g, ' ');
 function money(n, cur) {
   const v = Math.round(n).toLocaleString('en-US');
-  return cur === '$' || !cur ? '$' + v : v + ' ' + cur;
+  return cur === '$' || !cur ? '$' + v : v + ' ' + esc(cur);
 }
 function fmtVal(k, v, cur) {
   if (v === null || v === undefined) return '—';
@@ -127,14 +129,20 @@ function lineText(k, b, isPeriod, cur) {
   }
 }
 
-function mline(col, b, isPeriod, cur) {
+const CUMULATIVE = ['calls', 'talkMin', 'sales'];
+
+// Foiz — natija / to'liq plan. Rang — davrning o'tgan qismiga nisbatan (pacePct):
+// oy o'rtasida grafikdan oldinda bo'lgan xodim yashil ko'rinadi. Chiziqcha — bugun qayerda bo'lish kerakligi.
+function mline(col, b, isPeriod, cur, pace = 1) {
   const pct = b.pct[col.k] || 0;
-  const cls = pctClass(pct);
+  const cls = pctClass(b.pacePct?.[col.k] ?? pct);
   const icon = col.k === 'sales' && !isPeriod ? ICON.coin : ICON[col.icon];
+  const tick = isPeriod && pace > 0 && pace < 1 && CUMULATIVE.includes(col.k)
+    ? `<u style="left:${(pace * 100).toFixed(1)}%" title="Bugungi kungacha reja: ${Math.round(pace * 100)}%"></u>` : '';
   return `<div class="mline">
     <div class="lbl">${icon}${lineText(col.k, b, isPeriod, cur)}</div>
     <div class="pct c-${cls}">${Math.round(pct)}%</div>
-    <div class="bar"><i class="b-${cls}" style="width:${Math.min(100, pct).toFixed(1)}%"></i></div>
+    <div class="bar"><i class="b-${cls}" style="width:${Math.min(100, pct).toFixed(1)}%"></i>${tick}</div>
   </div>`;
 }
 
@@ -148,6 +156,7 @@ function filtersHtml(d, { sort = true } = {}) {
     <button class="btn ghost sm" id="prevDay" title="Oldingi kun">‹</button>
     <input type="date" class="input" id="fDate" value="${d.date}" title="Kun">
     <button class="btn ghost sm" id="nextDay" title="Keyingi kun">›</button>
+    ${d.date !== d.today ? '<button class="btn sm" id="todayBtn" title="Bugungi kunga qaytish">Bugun</button>' : ''}
     ${ui.period === 'custom' ? `<input type="date" class="input" id="fFrom" value="${d.range.from}" title="Dan"> — <input type="date" class="input" id="fTo" value="${d.range.to}" title="Gacha">` : `<span class="hint">${shortDate(d.range.from)} — ${shortDate(d.range.to)}</span>`}
     <div class="dd">
       <button class="btn ghost sm" id="empBtn">Xodimlar: ${esc(empLabel)} ▾</button>
@@ -167,9 +176,12 @@ function filtersHtml(d, { sort = true } = {}) {
 
 function bindFilters(rerender) {
   $$('#perSeg button').forEach((b) => b.addEventListener('click', () => { ui.period = b.dataset.p; saveUi(); rerender(); }));
-  $('#fDate')?.addEventListener('change', (e) => { ui.date = e.target.value; rerender(); });
-  $('#prevDay')?.addEventListener('click', () => { ui.date = addDays($('#fDate').value || todayStr(), -1); rerender(); });
-  $('#nextDay')?.addEventListener('click', () => { ui.date = addDays($('#fDate').value || todayStr(), 1); rerender(); });
+  // Bugungi sana tanlansa ui.date bo'shatiladi — shunda avtomatik yangilanish va yarim tundagi kun almashishi ishlayveradi
+  const setDate = (v) => { ui.date = !v || v === todayStr() ? '' : v; rerender(); };
+  $('#fDate')?.addEventListener('change', (e) => setDate(e.target.value));
+  $('#prevDay')?.addEventListener('click', () => setDate(addDays($('#fDate').value || todayStr(), -1)));
+  $('#nextDay')?.addEventListener('click', () => setDate(addDays($('#fDate').value || todayStr(), 1)));
+  $('#todayBtn')?.addEventListener('click', () => setDate(''));
   const onRange = () => { ui.from = $('#fFrom').value; ui.to = $('#fTo').value; saveUi(); if (ui.from && ui.to) rerender(); };
   $('#fFrom')?.addEventListener('change', onRange);
   $('#fTo')?.addEventListener('change', onRange);
@@ -256,12 +268,12 @@ function boardHtml(d) {
   for (const r of rows) {
     const top = r.rank === 1 && r.score > 0;
     html += `<div class="cell emp ${top ? 'first' : ''}">${avatar(r)}<div class="nm"><b title="${esc(r.name)}">${esc(r.name)}</b><small>${esc(r.role || '')}</small><span class="score">${Math.round(r.score)} ball · #${r.rank}</span></div>${r.rank <= 3 && r.score > 0 ? medal(r.rank) : ''}</div>`;
-    for (const c of COLS) html += `<div class="cell metric">${mline(c, r.day, false, cur)}${mline(c, r.period, true, cur)}</div>`;
+    for (const c of COLS) html += `<div class="cell metric ${top ? 'first' : ''}">${mline(c, r.day, false, cur)}${mline(c, r.period, true, cur, d.pace)}</div>`;
   }
   // Jami
   if (rows.length) {
     html += `<div class="cell total emp">${ICON.users}<div><b>JAMI NATIJA</b><small>(${d.totals.count} XODIM)</small></div></div>`;
-    for (const c of COLS) html += `<div class="cell total metric">${mline(c, d.totals.day, false, cur)}${mline(c, d.totals.period, true, cur)}</div>`;
+    for (const c of COLS) html += `<div class="cell total metric">${mline(c, d.totals.day, false, cur)}${mline(c, d.totals.period, true, cur, d.pace)}</div>`;
   }
   html += '</div></div>';
   return html;
@@ -269,11 +281,12 @@ function boardHtml(d) {
 
 function footHtml(d) {
   const sy = d.sync;
-  const st = (on, ok, err) => (!on ? 'ulanmagan' : err ? 'xato: ' + esc(err) : ok ? 'oxirgi sinx.: ' + new Date(ok).toLocaleTimeString('ru-RU', { timeZone: TZ, hour: '2-digit', minute: '2-digit' }) : 'kutilmoqda');
+  const st = (on, ok, err) => (!on ? 'ulanmagan' : err ? 'xato: ' + esc(err) : ok ? 'oxirgi sinx.: ' + localParts(ok).time : 'kutilmoqda');
+  const paceNote = d.pace < 1 ? ` · ${PERIOD_LABEL[d.period].toLowerCase()} qatorda rang bugungi kungacha bo'lgan rejaga nisbatan (chiziqcha = ${Math.round(d.pace * 100)}%)` : '';
   return `<div class="footnote">
     <span>OnlinePBX: ${st(sy.pbx, sy.lastOk.pbx, sy.lastError.pbx)}</span>
     <span>amoCRM: ${st(sy.amo, sy.lastOk.amo, sy.lastError.amo)}</span>
-    <span>Ranglar: ≥100% yashil · 65–99% sariq · &lt;65% qizil</span>
+    <span>Ranglar: ≥100% yashil · 65–99% sariq · &lt;65% qizil${paceNote}</span>
   </div>`;
 }
 
@@ -288,10 +301,47 @@ function updateSyncDot(sy) {
 async function renderDashboard() {
   const d = await api(dashQuery());
   if (current !== 'dashboard') return;
+  tzOffsetH = Number.isFinite(d.tzOffsetHours) ? d.tzOffsetHours : tzOffsetH;
   $('#view').innerHTML = headerHtml(d.settings) + bonusHtml(d) + filtersHtml(d) + boardHtml(d) + footHtml(d);
   bindFilters(renderDashboard);
   updateSyncDot(d.sync);
+  maybeAutoSync(d.sync, renderDashboard);
+  fitTv();
 }
+
+// Ma'lumot eskirgan bo'lsa (serverda fon jarayoni yo'q — masalan Vercel'da), ochiq turgan sahifa
+// sinxronizatsiyani o'zi boshlaydi va tugagach ekranni yangilaydi. Server ortiqcha ishlamaydi.
+let autoSyncAt = 0;
+function maybeAutoSync(sy, rerender) {
+  if (!sy?.stale || Date.now() - autoSyncAt < 60000) return;
+  autoSyncAt = Date.now();
+  fetch('/api/sync/auto', { method: 'POST' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((r) => { if (r?.ok && (current === 'dashboard' || current === 'rating') && !ui.date) rerender().catch(() => {}); })
+    .catch(() => {});
+}
+
+/* ================= TV rejim: butun doskani ekranga sig'dirish ================= */
+function fitTv() {
+  const m = $('#view');
+  const tv = document.body.classList.contains('tv');
+  m.style.transform = m.style.width = m.style.marginBottom = '';
+  document.body.classList.remove('tv-fit');
+  if (!tv) return;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  // Doska 1100px dan tor bo'lmasin; juda ko'p xodim bo'lsa 0.5 dan kichraymaydi (pastga aylantiriladi)
+  const maxZ = vw / 1100, minZ = 0.5;
+  let z = 1;
+  for (let i = 0; i < 4; i++) {
+    m.style.width = vw / z + 'px';
+    z = Math.max(minZ, Math.min(maxZ, vh / m.offsetHeight));
+  }
+  m.style.width = vw / z + 'px';
+  m.style.transform = `scale(${z})`;
+  m.style.marginBottom = -(m.offsetHeight * (1 - z)) + 'px';
+  document.body.classList.toggle('tv-fit', m.offsetHeight * z <= vh + 1);
+}
+window.addEventListener('resize', () => { if (document.body.classList.contains('tv')) fitTv(); });
 
 /* ================= REYTING ================= */
 function spark(trend, cap) {
@@ -305,6 +355,7 @@ function spark(trend, cap) {
 async function renderRating() {
   const d = await api(dashQuery());
   if (current !== 'rating') return;
+  tzOffsetH = Number.isFinite(d.tzOffsetHours) ? d.tzOffsetHours : tzOffsetH;
   const s = d.settings, cur = s.currency, PL = PERIOD_LABEL[d.period];
   const top = d.rows.slice(0, 3);
   const order = [top[1], top[0], top[2]].filter(Boolean);
@@ -314,7 +365,7 @@ async function renderRating() {
 
   const rows = d.rows.map((r) => {
     const sc = Math.round(r.score);
-    const cell = (k) => `<td class="num">${fmtVal(k, r.period.values[k], cur)}<span class="pctxt c-${pctClass(r.period.pct[k])}">${Math.round(r.period.pct[k])}%</span></td>`;
+    const cell = (k) => `<td class="num">${fmtVal(k, r.period.values[k], cur)}<span class="pctxt c-${pctClass(r.period.pacePct[k])}">${Math.round(r.period.pct[k])}%</span></td>`;
     const bonus = d.dailyBonus.findIndex((w) => w.id === r.id);
     return `<tr>
       <td><span class="rank-badge ${r.rank <= 3 && r.score > 0 ? 'r' + r.rank : ''}">${r.rank}</span></td>
@@ -327,7 +378,7 @@ async function renderRating() {
 
   $('#view').innerHTML = `
     <div class="panel"><div class="panel-head"><div><h2>🏆 Xodimlar reytingi — ${PL.toLowerCase()}</h2>
-      <div class="hint">Ball = KPI bajarilish foizlarining o'rtachasi (og'irliklar Sozlamalarda; bitta KPI uchun maksimal ${s.scoreCap}%). Kim yaxshi ishlasa — tepaga chiqadi.</div></div></div>
+      <div class="hint">Ball = KPI bajarilish foizlarining o'rtachasi (og'irliklar Sozlamalarda; bitta KPI uchun maksimal ${s.scoreCap}%). 100 ball = reja to'liq bajarilmoqda${d.pace < 1 ? ` (davrning o'tgan ${Math.round(d.pace * 100)}% qismiga nisbatan)` : ''}. Kim yaxshi ishlasa — tepaga chiqadi.</div></div></div>
       ${filtersHtml(d, { sort: false })}
     </div>
     ${d.rows.length ? `<div class="podium">${pod}</div>` : ''}
@@ -337,6 +388,7 @@ async function renderRating() {
     </table></div></div>`;
   bindFilters(renderRating);
   updateSyncDot(d.sync);
+  maybeAutoSync(d.sync, renderRating);
 }
 
 /* ================= NATIJA KIRITISH ================= */
@@ -352,7 +404,7 @@ async function renderEntries() {
     { k: 'script', l: 'Skript ball' },
     { k: 'conversion', l: 'Konversiya %', auto: (r) => (s.conversionSource === 'auto' && r.values.conversion != null && r.manual.conversion == null ? r.values.conversion.toFixed(1) : undefined) },
     { k: 'deals', l: 'Sotuvlar soni', auto: (r) => r.auto.deals },
-    { k: 'sales', l: `Sotuv summasi (${s.currency})`, auto: (r) => r.auto.sales },
+    { k: 'sales', l: `Sotuv summasi (${esc(s.currency)})`, auto: (r) => r.auto.sales },
   ];
   const rows = d.rows.filter((r) => r.active).map((r) => `<tr data-id="${r.employeeId}">
     <td><b>${esc(r.name)}</b></td>
@@ -394,7 +446,9 @@ async function renderEmployees() {
   if (current !== 'employees') return;
   $('#view').innerHTML = `<div class="panel">
     <div class="panel-head"><div><h2>Xodimlar</h2><div class="hint">Xodim qo'shish, tahrirlash, o'chirish. OnlinePBX ichki raqami va amoCRM foydalanuvchi ID'si orqali qo'ng'iroqlar va sotuvlar avtomatik bog'lanadi.</div></div>
-    <button class="btn" id="addEmp">+ Xodim qo'shish</button></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn ghost" id="importEmp" title="amoCRM foydalanuvchilari va OnlinePBX ichki raqamlaridan">⟳ amoCRM / OnlinePBX'dan yuklash</button><button class="btn" id="addEmp">+ Xodim qo'shish</button></div></div>
+    <div class="hint" style="margin:-4px 0 12px">Yangi xodimlar har sinxronizatsiyada o'zi qo'shiladi. Bitta odam ikkala tizimda bo'lsa ham bir marta chiqadi (ismi bo'yicha birlashtiriladi). Sotuvchi bo'lmaganlarni (rahbar, buxgalter) o'chirib qo'ying — ular qayta qo'shilmaydi.</div>
+    <div id="importResult"></div>
     <div class="emp-cards">${employeesCache.map((e) => `<div class="emp-card ${e.active === false ? 'off' : ''}">${avatar(e)}<div class="info">
       <b>${esc(e.name)}</b>${e.active === false ? ' <span class="chip muted">faol emas</span>' : ''}
       <div class="meta">${esc(e.role || '')}<br>Ichki raqam(lar): <b>${esc((e.extensions || []).join(', ') || '—')}</b><br>amoCRM ID: <b>${esc(e.amoUserId || '—')}</b></div>
@@ -403,6 +457,20 @@ async function renderEmployees() {
       <button class="btn danger sm" data-del="${e.id}">O'chirish</button></div></div></div>`).join('') || '<div class="hint">Hali xodim yo\'q</div>'}</div>
   </div>`;
   $('#addEmp').addEventListener('click', () => employeeForm());
+  $('#importEmp').addEventListener('click', (ev) => withBtn(ev.target, async () => {
+    const r = await api('/api/employees/import', { method: 'POST', body: {} });
+    const lines = [];
+    if (r.added.length) lines.push(`<span class="c-green"><b>Qo'shildi (${r.added.length}):</b></span> ${esc(r.added.join(', '))}`);
+    if (r.linked.length) lines.push(`<b>Mavjud xodimga biriktirildi (${r.linked.length}):</b> ${esc(r.linked.join(', '))}`);
+    if (r.merged?.length) lines.push(`<b>Takrorlar birlashtirildi (${r.merged.length}):</b> ${esc(r.merged.join(', '))}`);
+    if (r.extensions?.length) lines.push(`<span class="c-green"><b>Ichki raqamlar bog'landi:</b></span> ${esc(r.extensions.join(', '))}`);
+    if (!r.added.length && !r.linked.length && !r.merged?.length && !r.extensions?.length) lines.push("Yangi xodim topilmadi — ro'yxat allaqachon to'liq.");
+    if (r.unlinked?.length) lines.push(`Egasi aniqlanmagan ichki raqamlar: <b>${esc(r.unlinked.join(', '))}</b> — oxirgi 7 kunda ulardan qo'ng'iroq bo'lmagan. Kimniki ekanini bilsangiz, xodimni tahrirlab qo'lda yozing.`);
+    const SRC = { amo: 'amoCRM', pbx: 'OnlinePBX', link: "Ichki raqamlarni bog'lash" };
+    for (const [src, msg] of Object.entries(r.errors || {})) lines.push(`<span class="c-red">${SRC[src] || src}: ${esc(msg)}</span>`);
+    await renderEmployees();
+    $('#importResult').innerHTML = `<p class="hint" style="margin:0 0 12px;font-size:13px">${lines.join('<br>')}</p>`;
+  }, '#importResult'));
   $$('[data-edit]').forEach((b) => b.addEventListener('click', () => employeeForm(employeesCache.find((e) => e.id === b.dataset.edit))));
   $$('[data-toggle]').forEach((b) => b.addEventListener('click', async () => {
     const e = employeesCache.find((x) => x.id === b.dataset.toggle);
@@ -410,7 +478,7 @@ async function renderEmployees() {
   }));
   $$('[data-del]').forEach((b) => b.addEventListener('click', async () => {
     const e = employeesCache.find((x) => x.id === b.dataset.del);
-    if (!confirm(`"${e.name}" o'chirilsinmi? Uning barcha statistikasi ham o'chadi.\n(Statistikani saqlash uchun "Faolsizlantirish"ni tanlang.)`)) return;
+    if (!confirm(`"${e.name}" o'chirilsinmi? Uning barcha statistikasi ham o'chadi va u amoCRM / OnlinePBX'dan qayta yuklanmaydi.\n(Statistikani saqlash uchun "Faolsizlantirish"ni tanlang.)`)) return;
     try { await api('/api/employees/' + e.id + '?purge=1', { method: 'DELETE' }); toast("O'chirildi"); renderEmployees(); } catch (err) { toast(err.message, true); }
   }));
 }
@@ -469,9 +537,10 @@ async function renderSettings() {
   if (current !== 'settings') return;
   const num = (id, v, step = 'any') => `<input class="input" type="number" min="0" step="${step}" id="${id}" value="${v ?? ''}">`;
   const txt = (id, v, ph = '') => `<input class="input" id="${id}" value="${esc(v ?? '')}" placeholder="${esc(ph)}">`;
-  const kpiNames = { calls: "Real aloqa (ta)", talkMin: 'Suhbat vaqti (min)', script: 'Skript bali', conversion: 'Konversiya (%)', sales: `Sotuv summasi (${s.currency})` };
+  const kpiNames = { calls: "Real aloqa (ta)", talkMin: 'Suhbat vaqti (min)', script: 'Skript bali', conversion: 'Konversiya (%)', sales: `Sotuv summasi (${esc(s.currency)})` };
   const t = todayStr();
   $('#view').innerHTML = `
+  ${defaultPassword ? `<div class="panel warn"><b>⚠️ Admin parol hali standart ("admin").</b> Tarmoqdagi istalgan kishi kirib, ma'lumotlarni o'zgartira oladi — pastdagi "Admin parol" bo'limida uni almashtiring.</div>` : ''}
   <div class="panel"><h2>KPI plan va bonuslar</h2>
     <h3>Kunlik plan (har bir xodim uchun)</h3>
     <div class="grid-form">${Object.entries(kpiNames).map(([k, l]) => `<label class="field">${l}${num('p_' + k, s.plans[k])}</label>`).join('')}</div>
@@ -513,7 +582,7 @@ async function renderSettings() {
   <div class="panel"><h2>OnlinePBX (qo'ng'iroqlar)</h2>
     <div class="hint">API kalitni olish: <code>panel.onlinepbx.ru</code> → Sozlamalar / Integratsiya → <b>API</b> → kalit yaratish. Har bir xodimga uning ichki raqamini (Xodimlar bo'limida) yozing.${s.pbx.fromEnv ? '<br>⚠️ Qiymatlar .env faylidan olinmoqda (u ustun).' : ''}</div>
     <div class="grid-form" style="margin-top:10px">
-      <label class="field">Domen${txt('pbxDomain', s.pbx.domain, 'pbx35074.onpbx.ru')}</label>
+      <label class="field">Domen${txt('pbxDomain', s.pbx.domain, 'pbx12345.onpbx.ru')}</label>
       <label class="field">API kalit ${s.pbx.hasApiKey ? '(saqlangan ✓)' : ''}<input class="input" type="password" id="pbxKey" placeholder="${s.pbx.hasApiKey ? '•••••• (o\'zgartirish uchun yangisini kiriting)' : 'API kalit'}" autocomplete="off"></label>
       <label class="field">API manzil${txt('pbxBase', s.pbx.baseUrl)}</label>
     </div>
@@ -524,9 +593,9 @@ async function renderSettings() {
   <div class="panel"><h2>amoCRM (sotuvlar)</h2>
     <div class="hint">Token olish: amoCRM → <b>amoMarket</b> → ⋯ → <b>Integratsiya yaratish</b> (xususiy) → "Kalitlar va kirish" → <b>Uzoq muddatli token</b>. Yutilgan bitimlar (status 142 "Muvaffaqiyatli") yopilgan sanasi bo'yicha mas'ul xodimga yoziladi, summa = bitim byudjeti.${s.amo.fromEnv ? '<br>⚠️ Qiymatlar .env faylidan olinmoqda (u ustun).' : ''}</div>
     <div class="grid-form" style="margin-top:10px">
-      <label class="field">Subdomen (xxx.amocrm.ru)${txt('amoSub', s.amo.subdomain, 'uzgrow')}</label>
-      <label class="field">Domen${txt('amoBase', s.amo.baseDomain)}</label>
-      <label class="field">Uzoq muddatli token ${s.amo.hasToken ? '(saqlangan ✓)' : ''}<input class="input" type="password" id="amoToken" placeholder="${s.amo.hasToken ? '•••••• (o\'zgartirish uchun yangisini kiriting)' : 'token'}" autocomplete="off"></label>
+      <label class="field">Subdomen (bo'sh qolsa, tokendan aniqlanadi)${txt('amoSub', s.amo.subdomain, 'avtomatik')}</label>
+      <label class="field">Domen<select class="input" id="amoBase">${['amocrm.ru', 'amocrm.com', 'kommo.com'].map((x) => `<option ${s.amo.baseDomain === x ? 'selected' : ''}>${x}</option>`).join('')}</select></label>
+      <label class="field">Uzoq muddatli token ${s.amo.hasToken ? `(saqlangan ✓${s.amo.tokenExpires ? ', ' + shortDate(localParts(s.amo.tokenExpires * 1000).date) + ' gacha' : ''})` : ''}<input class="input" type="password" id="amoToken" placeholder="${s.amo.hasToken ? '•••••• (o\'zgartirish uchun yangisini kiriting)' : 'token'}" autocomplete="off"></label>
       <label class="field">Voronka ID (ixtiyoriy)${txt('amoPipe', s.amo.pipelineId, 'hammasi')}</label>
       <label class="field">"Yutildi" status ID${num('amoWon', s.amo.wonStatusId, 1)}</label>
     </div>
@@ -542,7 +611,56 @@ async function renderSettings() {
       <div><button class="btn" id="syncBtn">Hozir sinxronlash</button></div>
     </div>
     <div id="syncResult"></div>
+  </div>
+
+  <div class="panel"><h2>Zaxira nusxa va ko'chirish</h2>
+    <div class="hint">Butun ma'lumot (sozlamalar, ulangan kalitlar, xodimlar, statistika) bitta faylga yuklab olinadi. Shu fayl orqali ma'lumotni boshqa joyga — masalan, kompyuterdan Vercel'dagi saytga — ko'chirish mumkin. <b>Faylda kalitlar bor: uni hech kimga yubormang.</b></div>
+    <div class="form-actions" style="justify-content:flex-start"><button class="btn ghost" id="backupBtn">⬇ Zaxira nusxani yuklab olish</button>
+      <label class="btn ghost" style="cursor:pointer">⬆ Fayldan tiklash<input type="file" id="restoreFile" accept="application/json,.json" hidden></label></div>
+    <div id="backupResult"></div>
+  </div>
+
+  <div class="panel"><h2>Admin parol</h2>
+    <div class="hint">Parol shu kompyuterda shifrlangan holda saqlanadi. Unutib qo'ysangiz: dasturni to'xtating, <code>data/db.json</code> faylidan <code>"auth"</code> qismini o'chiring — parol yana <code>.env</code> dagi <code>ADMIN_PASSWORD</code> bo'ladi.</div>
+    <form id="passF" class="grid-form" style="margin-top:10px;align-items:end">
+      <label class="field">Joriy parol<input class="input" type="password" id="pwCur" autocomplete="current-password"></label>
+      <label class="field">Yangi parol (kamida 6 belgi)<input class="input" type="password" id="pwNew" autocomplete="new-password"></label>
+      <label class="field">Yangi parol (takror)<input class="input" type="password" id="pwNew2" autocomplete="new-password"></label>
+      <div><button class="btn" type="submit">Parolni o'zgartirish</button></div>
+    </form>
   </div>`;
+
+  $('#backupBtn').addEventListener('click', (ev) => withBtn(ev.target, async () => {
+    const data = await api('/api/backup');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' }));
+    a.download = `uzgrow-dashboard-${todayStr()}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    $('#backupResult').innerHTML = `<p class="hint">Yuklab olindi: ${data.employees.length} xodim, ${Object.keys(data.auto).length} kunlik statistika.</p>`;
+  }, '#backupResult'));
+  $('#restoreFile').addEventListener('change', async (ev) => {
+    const file = ev.target.files[0];
+    ev.target.value = '';
+    if (!file) return;
+    try {
+      const body = JSON.parse(await file.text());
+      if (!confirm(`"${file.name}" faylidan tiklansinmi?\nHozirgi barcha ma'lumot (sozlamalar, xodimlar, statistika, admin parol) shu fayldagisi bilan almashtiriladi.`)) return;
+      const r = await api('/api/restore', { method: 'POST', body });
+      token = r.token; localStorage.setItem('uzg.token', token);
+      toast(`Tiklandi ✓ (${r.employees} xodim)`); renderSettings();
+    } catch (e) { $('#backupResult').innerHTML = `<p class="c-red"><b>✗ ${esc(e instanceof SyntaxError ? "Fayl JSON emas" : e.message)}</b></p>`; }
+  });
+
+  $('#passF').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    if ($('#pwNew').value !== $('#pwNew2').value) return toast('Yangi parollar bir xil emas', true);
+    try {
+      const r = await api('/api/password', { method: 'POST', body: { current: $('#pwCur').value, next: $('#pwNew').value } });
+      token = r.token; localStorage.setItem('uzg.token', token); defaultPassword = false;
+      toast("Parol o'zgartirildi ✓"); renderSettings();
+    } catch (e) { toast(e.message, true); }
+  });
 
   const n = (id) => $('#' + id).value;
   $('#saveMain').addEventListener('click', () => saveSettings({
@@ -570,6 +688,9 @@ async function renderSettings() {
   $('#testAmo').addEventListener('click', (ev) => withBtn(ev.target, async () => {
     await api('/api/settings', { method: 'PUT', body: amoBody() });
     const r = await api('/api/test/amo', { method: 'POST' });
+    // subdomen tokendan avtomatik aniqlangan bo'lishi mumkin — maydonni yangilaymiz
+    const saved = await api('/api/settings');
+    $('#amoSub').value = saved.amo.subdomain; $('#amoBase').value = saved.amo.baseDomain; $('#amoToken').value = '';
     $('#amoResult').innerHTML = `<p class="c-green"><b>✓ Ulandi.</b></p>
       <h3>Foydalanuvchilar (ID → Xodimlar bo'limiga yozing)</h3>
       <div class="table-wrap"><table class="tbl" style="min-width:0"><tr><th>ID</th><th>Ism</th><th>Email</th></tr>${r.users.map((u) => `<tr><td><b>${u.id}</b></td><td>${esc(u.name)}</td><td>${esc(u.email || '')}</td></tr>`).join('')}</table></div>
@@ -613,8 +734,9 @@ function loginForm() {
     e.preventDefault();
     try {
       const r = await api('/api/login', { method: 'POST', body: { password: $('#lPass').value } });
-      token = r.token; localStorage.setItem('uzg.token', token); isAdmin = true;
-      updateAuthBtn(); closeModal(); toast('Xush kelibsiz!'); route();
+      token = r.token; localStorage.setItem('uzg.token', token); isAdmin = true; defaultPassword = Boolean(r.defaultPassword);
+      updateAuthBtn(); closeModal(); route();
+      if (defaultPassword) toast('Parol hali standart ("admin") — Sozlamalarda o\'zgartiring!', true); else toast('Xush kelibsiz!');
     } catch (err) { toast(err.message, true); }
   });
 }
@@ -624,14 +746,19 @@ $('#authBtn').addEventListener('click', () => {
   if (isAdmin) { token = ''; isAdmin = false; localStorage.removeItem('uzg.token'); updateAuthBtn(); route(); }
   else loginForm();
 });
+function setTv(on) {
+  document.body.classList.toggle('tv', on);
+  if (on) { ui.date = ''; closeModal(); }
+  if (on && current !== 'dashboard') location.hash = '#/'; else if (current === 'dashboard') fitTv();
+}
 $('#tvBtn').addEventListener('click', () => {
-  document.body.classList.add('tv');
-  location.hash = '#/';
+  setTv(true);
   document.documentElement.requestFullscreen?.().catch(() => {});
   toast('TV rejimdan chiqish: Esc yoki ekranni ikki marta bosing');
 });
-document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) document.body.classList.remove('tv'); });
-document.addEventListener('dblclick', () => { if (document.body.classList.contains('tv')) { document.body.classList.remove('tv'); document.exitFullscreen?.().catch(() => {}); } });
+document.addEventListener('fullscreenchange', () => { if (document.fullscreenElement) fitTv(); else setTv(false); });
+document.addEventListener('dblclick', () => { if (document.body.classList.contains('tv')) { setTv(false); document.exitFullscreen?.().catch(() => {}); } });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.body.classList.contains('tv') && !document.fullscreenElement) setTv(false); });
 
 /* ================= router ================= */
 const VIEWS = { '': 'dashboard', reyting: 'rating', kiritish: 'entries', xodimlar: 'employees', sozlamalar: 'settings' };
@@ -665,7 +792,12 @@ refreshTimer = setInterval(() => {
 }, 60000);
 
 (async function init() {
-  try { isAdmin = token ? (await api('/api/me')).admin : false; } catch { isAdmin = false; }
+  try {
+    const me = token ? await api('/api/me') : {};
+    isAdmin = Boolean(me.admin); defaultPassword = Boolean(me.defaultPassword);
+  } catch { isAdmin = false; }
+  // "#/?tv" manzili — televizor uchun: sahifa darhol TV rejimda ochiladi
+  if (/[?&]tv\b/.test(location.hash) || /[?&]tv\b/.test(location.search)) document.body.classList.add('tv');
   if (!isAdmin && token) { token = ''; localStorage.removeItem('uzg.token'); }
   updateAuthBtn();
   route();

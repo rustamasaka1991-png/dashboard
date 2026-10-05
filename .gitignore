@@ -3,3 +3,6 @@ node_modules/
 data/*.json
 data/*.tmp
 !data/.gitkeep
+.vercel/
+.env*.local
+.claude/

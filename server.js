@@ -33,7 +33,29 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
 const PUBLIC = path.join(__dirname, 'public');
 const MAX_BODY = 3 * 1024 * 1024;
 
-const adminToken = crypto.createHash('sha256').update('uzgrow-dashboard:' + ADMIN_PASSWORD).digest('hex');
+const sha256 = (v) => crypto.createHash('sha256').update(String(v)).digest();
+// Uzunligi har xil satrlarni ham vaqt bo'yicha xavfsiz solishtirish
+const safeEqual = (a, b) => crypto.timingSafeEqual(sha256(a), sha256(b));
+
+// Admin parol: Sozlamalarda o'zgartirilgan bo'lsa db.json'dagi xesh, aks holda .env dagi ADMIN_PASSWORD
+function checkPassword(password) {
+  const auth = db.get().auth;
+  if (auth?.hash) {
+    const hash = crypto.scryptSync(String(password), Buffer.from(auth.salt, 'hex'), 32);
+    return crypto.timingSafeEqual(hash, Buffer.from(auth.hash, 'hex'));
+  }
+  return safeEqual(password, ADMIN_PASSWORD);
+}
+function adminToken() {
+  const auth = db.get().auth;
+  return sha256('uzgrow-dashboard:' + (auth?.hash ? 'h:' + auth.hash : 'p:' + ADMIN_PASSWORD)).toString('hex');
+}
+const isDefaultPassword = () => !db.get().auth?.hash && ADMIN_PASSWORD === 'admin';
+
+// Parolni tanlab topishga qarshi: bitta IP'dan ketma-ket xato urinishlar cheklanadi
+const LOGIN_MAX_FAILS = 8;
+const LOGIN_LOCK_MS = 5 * 60 * 1000;
+const loginFails = new Map(); // ip -> { n, until }
 
 // ---------- yordamchilar ----------
 class HttpError extends Error {
@@ -62,11 +84,14 @@ function readBody(req) {
     });
     req.on('end', () => {
       if (!chunks.length) return resolve({});
+      let body;
       try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       } catch {
-        reject(new HttpError(400, "JSON noto'g'ri"));
+        return reject(new HttpError(400, "JSON noto'g'ri"));
       }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return reject(new HttpError(400, "So'rov obyekt bo'lishi kerak"));
+      resolve(body);
     });
     req.on('error', reject);
   });
@@ -74,8 +99,20 @@ function readBody(req) {
 
 function isAdmin(req) {
   const h = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  if (h.length !== adminToken.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(h), Buffer.from(adminToken));
+  return Boolean(h) && safeEqual(h, adminToken());
+}
+
+function loginGuard(ip) {
+  const f = loginFails.get(ip);
+  if (f && Date.now() >= f.until) loginFails.delete(ip);
+  else if (f && f.n >= LOGIN_MAX_FAILS) throw new HttpError(429, "Juda ko'p xato urinish. 5 daqiqadan keyin qayta urinib ko'ring.");
+}
+function loginFailed(ip) {
+  if (loginFails.size > 5000) loginFails.clear();
+  const f = loginFails.get(ip) || { n: 0, until: 0 };
+  f.n++;
+  f.until = Date.now() + LOGIN_LOCK_MS;
+  loginFails.set(ip, f);
 }
 
 function requireAdmin(req) {
@@ -115,10 +152,12 @@ function publicSettings(settings) {
   };
   s.amo = {
     subdomain: a.subdomain, baseDomain: a.baseDomain, pipelineId: a.pipelineId, wonStatusId: a.wonStatusId,
-    token: '', hasToken: Boolean(a.token), fromEnv: Boolean(process.env.AMO_TOKEN || process.env.AMO_SUBDOMAIN),
+    token: '', hasToken: Boolean(a.token), tokenExpires: a.token ? amo.tokenInfo(a.token)?.exp || 0 : 0, fromEnv: Boolean(process.env.AMO_TOKEN || process.env.AMO_SUBDOMAIN),
   };
   return s;
 }
+
+const AMO_DOMAINS = ['amocrm.ru', 'amocrm.com', 'kommo.com'];
 
 function applySettings(current, body) {
   const s = JSON.parse(JSON.stringify(current));
@@ -129,7 +168,7 @@ function applySettings(current, body) {
     const v = optNum(body[k]);
     if (v !== undefined && v >= 0) s[k] = v;
   }
-  if (Array.isArray(body.daysOff)) s.daysOff = body.daysOff.map(Number).filter((d) => d >= 0 && d <= 6);
+  if (Array.isArray(body.daysOff)) s.daysOff = [...new Set(body.daysOff.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))];
   if (['all', 'outbound', 'inbound'].includes(body.callDirection)) s.callDirection = body.callDirection;
   if (['manual', 'auto'].includes(body.conversionSource)) s.conversionSource = body.conversionSource;
   for (const group of ['plans', 'weights']) {
@@ -140,22 +179,51 @@ function applySettings(current, body) {
       }
     }
   }
-  if (body.pbx) {
-    if (body.pbx.domain !== undefined) s.pbx.domain = str(body.pbx.domain, 100).replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-    if (body.pbx.baseUrl) s.pbx.baseUrl = str(body.pbx.baseUrl, 200);
+  if (body.pbx && typeof body.pbx === 'object') {
+    if (body.pbx.domain !== undefined) {
+      const domain = str(body.pbx.domain, 100).replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
+      if (domain && !/^[a-z0-9.-]+$/.test(domain)) throw new HttpError(400, "OnlinePBX domeni noto'g'ri (masalan: pbx12345.onpbx.ru)");
+      s.pbx.domain = domain;
+    }
+    if (body.pbx.baseUrl) {
+      const baseUrl = str(body.pbx.baseUrl, 200).replace(/\/+$/, '');
+      if (!/^https:\/\/[a-z0-9.-]+(:\d+)?(\/[\w./-]*)?$/i.test(baseUrl)) throw new HttpError(400, 'OnlinePBX API manzili https:// bilan boshlanishi kerak');
+      s.pbx.baseUrl = baseUrl;
+    }
     if (body.pbx.apiKey) s.pbx.apiKey = str(body.pbx.apiKey, 300);
     if (body.pbx.clearApiKey) s.pbx.apiKey = '';
   }
-  if (body.amo) {
-    if (body.amo.subdomain !== undefined) s.amo.subdomain = str(body.amo.subdomain, 100).replace(/^https?:\/\//, '').replace(/\..*$/, '');
-    if (body.amo.baseDomain) s.amo.baseDomain = str(body.amo.baseDomain, 50);
+  if (body.amo && typeof body.amo === 'object') {
+    if (body.amo.subdomain !== undefined) {
+      const sub = str(body.amo.subdomain, 100).replace(/^https?:\/\//, '').replace(/[./].*$/, '').toLowerCase();
+      if (sub && !/^[a-z0-9-]+$/.test(sub)) throw new HttpError(400, "amoCRM subdomeni noto'g'ri (masalan: uzgrow)");
+      s.amo.subdomain = sub;
+    }
+    if (body.amo.baseDomain) {
+      const baseDomain = str(body.amo.baseDomain, 50).toLowerCase();
+      if (!AMO_DOMAINS.includes(baseDomain)) throw new HttpError(400, 'amoCRM domeni faqat: ' + AMO_DOMAINS.join(', '));
+      s.amo.baseDomain = baseDomain;
+    }
     if (body.amo.pipelineId !== undefined) s.amo.pipelineId = str(body.amo.pipelineId, 30);
     const ws = optNum(body.amo.wonStatusId);
     if (ws) s.amo.wonStatusId = ws;
-    if (body.amo.token) s.amo.token = str(body.amo.token, 4000);
+    if (body.amo.token) {
+      s.amo.token = str(body.amo.token, 4000).replace(/^Bearer\s+/i, '');
+      // Token qaysi domenga tegishli ekanini o'zi biladi (amocrm.ru / amocrm.com / kommo.com)
+      const tokenDomain = amo.tokenInfo(s.amo.token)?.baseDomain;
+      if (AMO_DOMAINS.includes(tokenDomain)) s.amo.baseDomain = tokenDomain;
+    }
     if (body.amo.clearToken) s.amo.token = '';
   }
   return s;
+}
+
+// Token bor, lekin subdomen yo'q bo'lsa — subdomenni amoCRM'dan avtomatik aniqlab saqlaymiz
+async function ensureAmoSubdomain(state) {
+  const c = amo.cfgFrom(state.settings);
+  if (c.subdomain || !c.token) return;
+  state.settings.amo.subdomain = await amo.detectSubdomain(state.settings);
+  db.saveNow('core');
 }
 
 // ---------- API ----------
@@ -165,12 +233,36 @@ async function api(req, res, url) {
   const q = Object.fromEntries(url.searchParams);
 
   if (route === 'POST /api/login') {
+    // Internetga ochiq muhitda standart "admin" paroli bilan kirishga yo'l qo'yilmaydi
+    if (db.SERVERLESS && isDefaultPassword()) {
+      throw new HttpError(403, "Admin parol o'rnatilmagan. Vercel'da: Settings -> Environment Variables -> ADMIN_PASSWORD qo'shing va qayta deploy qiling.");
+    }
+    // x-forwarded-for faqat Vercel ortida ishonchli (kompyuterda uni istalgan kishi soxtalashtira oladi)
+    const ip = (db.SERVERLESS && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket.remoteAddress || '';
+    loginGuard(ip);
     const body = await readBody(req);
-    const ok = String(body.password || '') === ADMIN_PASSWORD;
-    if (!ok) throw new HttpError(401, "Parol noto'g'ri");
-    return send(res, 200, { token: adminToken });
+    if (!checkPassword(String(body.password ?? ''))) {
+      loginFailed(ip);
+      throw new HttpError(401, "Parol noto'g'ri");
+    }
+    loginFails.delete(ip);
+    return send(res, 200, { token: adminToken(), defaultPassword: isDefaultPassword() });
   }
-  if (route === 'GET /api/me') return send(res, 200, { admin: isAdmin(req) });
+  if (route === 'GET /api/me') {
+    const admin = isAdmin(req);
+    return send(res, 200, { admin, defaultPassword: admin && isDefaultPassword() });
+  }
+  if (route === 'POST /api/password') {
+    requireAdmin(req);
+    const body = await readBody(req);
+    if (!checkPassword(String(body.current ?? ''))) throw new HttpError(400, "Joriy parol noto'g'ri");
+    const next = String(body.next ?? '');
+    if (next.length < 6 || next.length > 200) throw new HttpError(400, "Yangi parol kamida 6 ta belgidan iborat bo'lsin");
+    const salt = crypto.randomBytes(16);
+    state.auth = { salt: salt.toString('hex'), hash: crypto.scryptSync(next, salt, 32).toString('hex') };
+    db.saveNow('core');
+    return send(res, 200, { token: adminToken() });
+  }
 
   if (route === 'GET /api/dashboard') {
     const ids = q.ids ? q.ids.split(',').filter(Boolean) : null;
@@ -178,8 +270,9 @@ async function api(req, res, url) {
     return send(res, 200, {
       ...data,
       today: D.today(),
+      tzOffsetHours: D.OFFSET_H,
       settings: publicSettings(state.settings),
-      sync: { ...sync.status, pbx: pbx.isConfigured(state.settings), amo: amo.isConfigured(state.settings) },
+      sync: { ...sync.status, stale: sync.isStale(), pbx: pbx.isConfigured(state.settings), amo: amo.isConfigured(state.settings) },
     });
   }
 
@@ -187,7 +280,9 @@ async function api(req, res, url) {
   if (route === 'PUT /api/settings') {
     requireAdmin(req);
     state.settings = applySettings(state.settings, await readBody(req));
-    db.saveNow();
+    db.saveNow('core');
+    // aniqlab bo'lmasa saqlash to'xtamaydi — sababi "amoCRM'ni tekshirish"da ko'rsatiladi
+    await ensureAmoSubdomain(state).catch(() => {});
     sync.startScheduler();
     return send(res, 200, publicSettings(state.settings));
   }
@@ -200,8 +295,21 @@ async function api(req, res, url) {
     requireAdmin(req);
     const e = cleanEmployee(await readBody(req), { id: db.newId(), extensions: [], amoUserId: '', photo: '', role: 'Sotuv menejer', active: true, createdAt: new Date().toISOString() });
     state.employees.push(e);
-    db.saveNow();
+    db.saveNow('core');
     return send(res, 201, e);
+  }
+  if (route === 'POST /api/employees/import') {
+    requireAdmin(req);
+    const body = await readBody(req);
+    if (!pbx.isConfigured(state.settings) && !amo.isConfigured(state.settings)) {
+      throw new HttpError(400, 'Avval Sozlamalarda amoCRM yoki OnlinePBX ni ulang');
+    }
+    db.hold();
+    try {
+      return send(res, 200, await sync.importRoster({ force: body.force === true, manual: true }));
+    } finally {
+      db.release();
+    }
   }
   const empMatch = url.pathname.match(/^\/api\/employees\/([a-z0-9]+)$/);
   if (empMatch) {
@@ -210,7 +318,7 @@ async function api(req, res, url) {
     if (idx < 0) throw new HttpError(404, 'Xodim topilmadi');
     if (req.method === 'PUT') {
       state.employees[idx] = cleanEmployee(await readBody(req), state.employees[idx]);
-      db.saveNow();
+      db.saveNow('core');
       return send(res, 200, state.employees[idx]);
     }
     if (req.method === 'DELETE') {
@@ -224,6 +332,7 @@ async function api(req, res, url) {
   }
 
   if (route === 'GET /api/entries') {
+    requireAdmin(req);
     const date = D.isDate(q.date) ? q.date : D.today();
     return send(res, 200, {
       date,
@@ -242,7 +351,8 @@ async function api(req, res, url) {
     const body = await readBody(req);
     if (!D.isDate(body.date)) throw new HttpError(400, 'Sana noto\'g\'ri');
     const fields = ['script', 'conversion', 'sales', 'deals', 'calls', 'talkMin'];
-    for (const row of body.rows || []) {
+    for (const row of Array.isArray(body.rows) ? body.rows : []) {
+      if (!row || typeof row !== 'object') continue;
       if (!state.employees.some((e) => e.id === row.employeeId)) continue;
       const cur = { ...(state.entries[body.date]?.[row.employeeId] || {}) };
       for (const f of fields) {
@@ -255,7 +365,7 @@ async function api(req, res, url) {
       if (Object.keys(cur).length) state.entries[body.date][row.employeeId] = cur;
       else delete state.entries[body.date][row.employeeId];
     }
-    db.saveNow();
+    db.saveNow('entries');
     return send(res, 200, { ok: true });
   }
 
@@ -269,6 +379,29 @@ async function api(req, res, url) {
     return send(res, 200, await sync.syncRange(from, to));
   }
   if (route === 'GET /api/sync') return send(res, 200, sync.status);
+  // Ochiq turgan dashboard va Vercel Cron chaqiradi: ma'lumot eskirgan bo'lsagina bugun va kechani yangilaydi
+  if (route === 'GET /api/sync/auto' || route === 'POST /api/sync/auto') return send(res, 200, await sync.autoSync());
+
+  // Zaxira nusxa: butun ma'lumotni (sozlamalar, kalitlar, xodimlar, statistika) yuklab olish va tiklash.
+  // Kompyuterdagi ma'lumotni Vercel'ga ko'chirish ham shu orqali.
+  if (route === 'GET /api/backup') {
+    requireAdmin(req);
+    const { settings, employees, entries, auto, imported, auth } = state;
+    return send(res, 200, { app: 'uzgrow-dashboard', savedAt: new Date().toISOString(), settings, employees, entries, auto, imported, auth });
+  }
+  if (route === 'POST /api/restore') {
+    requireAdmin(req);
+    const body = await readBody(req);
+    if (body.app !== 'uzgrow-dashboard' || !body.settings || !Array.isArray(body.employees)) {
+      throw new HttpError(400, "Bu fayl dashboard zaxira nusxasi emas");
+    }
+    for (const k of ['entries', 'auto']) if (body[k] && (typeof body[k] !== 'object' || Array.isArray(body[k]))) throw new HttpError(400, "Zaxira fayli buzilgan");
+    const employees = body.employees.filter((e) => e && typeof e === 'object' && /^[a-z0-9]+$/.test(String(e.id)) && typeof e.name === 'string' && e.name.trim());
+    const auth = body.auth && /^[0-9a-f]+$/.test(String(body.auth.salt)) && /^[0-9a-f]+$/.test(String(body.auth.hash)) ? { salt: body.auth.salt, hash: body.auth.hash } : null;
+    db.replace({ settings: body.settings, employees, entries: body.entries, auto: body.auto, imported: body.imported, auth });
+    sync.startScheduler();
+    return send(res, 200, { ok: true, employees: employees.length, token: adminToken() });
+  }
 
   if (route === 'POST /api/test/pbx') {
     requireAdmin(req);
@@ -280,6 +413,7 @@ async function api(req, res, url) {
   }
   if (route === 'POST /api/test/amo') {
     requireAdmin(req);
+    await ensureAmoSubdomain(state);
     const [users, pipelines] = await Promise.all([amo.users(state.settings), amo.pipelines(state.settings)]);
     return send(res, 200, { ok: true, users, pipelines });
   }
@@ -291,7 +425,12 @@ async function api(req, res, url) {
 const TYPES = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.webp': 'image/webp', '.jpg': 'image/jpeg' };
 
 function serveStatic(req, res, url) {
-  let p = decodeURIComponent(url.pathname);
+  let p;
+  try {
+    p = decodeURIComponent(url.pathname);
+  } catch {
+    throw new HttpError(400, "Manzil noto'g'ri");
+  }
   if (p === '/') p = '/index.html';
   const file = path.normalize(path.join(PUBLIC, p));
   if (!file.startsWith(PUBLIC + path.sep) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
@@ -302,21 +441,43 @@ function serveStatic(req, res, url) {
   fs.createReadStream(file).pipe(res);
 }
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://localhost');
+// So'rovlarni qayta ishlovchi: kompyuterda http serverga, Vercel'da api/index.js orqali funksiyaga ulanadi
+async function handler(req, res) {
   try {
-    if (url.pathname.startsWith('/api/')) await api(req, res, url);
-    else serveStatic(req, res, url);
+    let url;
+    try {
+      url = new URL(req.url, 'http://localhost');
+    } catch {
+      throw new HttpError(400, "Manzil noto'g'ri");
+    }
+    if (url.pathname.startsWith('/api/')) {
+      await db.refresh();
+      sync.restoreStatus();
+      try {
+        await api(req, res, url);
+      } finally {
+        await db.flush();
+      }
+    } else serveStatic(req, res, url);
   } catch (err) {
-    const status = err.status || (/sozlanmagan/.test(err.message) ? 400 : 502);
-    if (!err.status) console.error('[api]', req.method, url.pathname, err.message);
-    if (!res.headersSent) send(res, status, { error: err.message });
+    // status'siz xato — kutilmagan ichki xato: tafsiloti faqat server oynasiga yoziladi
+    if (!err.status) console.error('[server]', req.method, req.url, err.stack || err.message);
+    if (!res.headersSent) send(res, err.status || 500, { error: err.status ? err.message : 'Serverda ichki xato' });
+    else res.destroy();
   }
-});
+}
 
-if (require.main === module) {
-  db.load();
-  if (ADMIN_PASSWORD === 'admin') console.warn('DIQQAT: ADMIN_PASSWORD o\'rnatilmagan, vaqtinchalik parol "admin". .env faylida o\'zgartiring!');
+const server = http.createServer(handler);
+
+async function main() {
+  try {
+    await db.refresh();
+    sync.restoreStatus();
+  } catch (err) {
+    console.error('XATO: ' + err.message);
+    process.exit(1);
+  }
+  if (isDefaultPassword()) console.warn('DIQQAT: admin parol hali "admin". Dashboardga kirib, Sozlamalar -> "Admin parol" bo\'limida o\'zgartiring!');
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
       console.error(`XATO: ${PORT}-port band. Dastur allaqachon ochiq bo'lishi mumkin — brauzerda http://localhost:${PORT} ni oching yoki .env da PORT ni o'zgartiring.`);
@@ -343,4 +504,6 @@ if (require.main === module) {
   process.on('SIGTERM', shutdown);
 }
 
-module.exports = { server, applySettings };
+if (require.main === module) main();
+
+module.exports = { server, handler, applySettings, loginFails };
