@@ -240,7 +240,9 @@ async function api(req, res, url) {
   if (route === 'POST /api/login') {
     // Internetga ochiq muhitda standart "admin" paroli bilan kirishga yo'l qo'yilmaydi
     if (db.SERVERLESS && isDefaultPassword()) {
-      throw new HttpError(403, "Admin parol o'rnatilmagan. Vercel'da: Settings -> Environment Variables -> ADMIN_PASSWORD qo'shing va qayta deploy qiling.");
+      throw new HttpError(403, process.env.ADMIN_PASSWORD
+        ? 'ADMIN_PASSWORD qiymati "admin" bo\'lib turibdi — internetdagi saytda bu parol bilan kirish yopiq. Vercel\'da uni boshqa parolga o\'zgartiring va Redeploy qiling.'
+        : "Admin parol o'rnatilmagan. Vercel'da: Settings -> Environment Variables -> ADMIN_PASSWORD qo'shing va qayta deploy qiling.");
     }
     // x-forwarded-for faqat Vercel ortida ishonchli (kompyuterda uni istalgan kishi soxtalashtira oladi)
     const ip = (db.SERVERLESS && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket.remoteAddress || '';
