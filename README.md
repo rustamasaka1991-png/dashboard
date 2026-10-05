@@ -88,7 +88,7 @@ Oylik bonus: oy davomida eng ko'p sotuv summasi.
 Kompyuterda dastur `data/db.json` fayliga yozadi va fonda har 5 daqiqada sinxronlaydi. Vercel'da
 doimiy fayl ham, fon jarayoni ham yo'q, shuning uchun u yerda:
 
-- ma'lumot **Upstash Redis**'da saqlanadi (bepul tarif yetadi);
+- ma'lumot **Supabase**'dagi bitta jadvalda saqlanadi (bepul tarif yetadi; Upstash Redis ham mumkin);
 - sinxronizatsiyani **ochiq turgan dashboard** boshlaydi (ma'lumot `syncMinutes` dan eski bo'lsa),
   bundan tashqari Vercel Cron har kuni Toshkent vaqti bilan 00:30 da bir marta ishlaydi.
   Hech kim sahifani ochmasa, kun davomida yangilanmaydi — TV'da ochiq tursa, muammo yo'q.
@@ -97,15 +97,33 @@ Qadamlar:
 
 1. [vercel.com/new](https://vercel.com/new) → GitHub'dagi shu repozitoriyni tanlang → **Deploy**
    (sozlamalarga tegmang — Vercel o'zi "Node" deb taniydi).
-2. Loyiha → **Storage** → **Create Database** → **Upstash for Redis** → region: Frankfurt →
-   loyihaga ulang. (`KV_REST_API_URL` va `KV_REST_API_TOKEN` o'zi qo'shiladi.)
-3. Loyiha → **Settings → Environment Variables** → `ADMIN_PASSWORD` = o'zingizning parolingiz.
-   Bu qo'yilmaguncha Vercel'dagi saytda admin sifatida kirib bo'lmaydi.
-4. **Deployments** → oxirgi deploy → **Redeploy** (yangi o'zgaruvchilar kuchga kirishi uchun).
-5. Kompyuterdagi ma'lumotni ko'chirish: kompyuterdagi dashboardda **Sozlamalar → Zaxira nusxa →
+2. Supabase loyihasida **SQL Editor** → quyidagini qo'yib **Run** bosing (bir marta):
+
+   ```sql
+   create table if not exists public.dashboard_kv (
+     key text primary key,
+     value text not null,
+     updated_at timestamptz not null default now()
+   );
+   alter table public.dashboard_kv enable row level security;
+   ```
+
+   Jadvalda OnlinePBX / amoCRM kalitlari ham turadi, shuning uchun u RLS bilan yopiladi va hech
+   qanday "policy" qo'shilmaydi: uni faqat serverdagi maxfiy kalit o'qiy oladi.
+3. Supabase → **Project Settings → API Keys** → **Secret key** (`sb_secret_...`; eski ko'rinishda
+   `service_role`) ni nusxalang. `sb_publishable_...` (anon) kalit to'g'ri kelmaydi — u ochiq kalit.
+4. Vercel → loyiha → **Settings → Environment Variables** ga uchta o'zgaruvchi qo'shing:
+   - `SUPABASE_URL` — loyiha manzili (`https://xxxx.supabase.co`)
+   - `SUPABASE_SECRET_KEY` — 3-qadamdagi maxfiy kalit
+   - `ADMIN_PASSWORD` — o'zingizning admin parolingiz (busiz Vercel'dagi saytda admin bo'lib kirib bo'lmaydi)
+5. **Deployments** → oxirgi deploy → **Redeploy** (yangi o'zgaruvchilar kuchga kirishi uchun).
+6. Kompyuterdagi ma'lumotni ko'chirish: kompyuterdagi dashboardda **Sozlamalar → Zaxira nusxa →
    yuklab olish**, keyin Vercel'dagi saytda admin bo'lib kirib **Sozlamalar → Fayldan tiklash**.
    Kalitlar, xodimlar va statistika birga ko'chadi. Fayldan keyin parol kompyuterdagi parol bo'ladi
    (agar u Sozlamalarda o'zgartirilgan bo'lsa).
+
+Upstash Redis ishlatmoqchi bo'lsangiz: 2–4-qadamlar o'rniga Vercel → **Storage → Upstash for Redis**
+ni loyihaga ulang (`KV_REST_API_URL` va `KV_REST_API_TOKEN` o'zi qo'shiladi) va `ADMIN_PASSWORD` ni qo'ying.
 
 Eslatma: Vercel'dagi manzilni bilgan har kim doskani ko'ra oladi (ismlar va raqamlar). O'zgartirish
 uchun esa admin parol kerak. Kalit va tokenlar brauzerga hech qachon berilmaydi.
@@ -120,6 +138,6 @@ lib/amo.js        amoCRM API klienti
 lib/sync.js       sinxronizatsiya (fon jadvali yoki so'rov bo'yicha)
 lib/roster.js     xodimlarni amoCRM / OnlinePBX'dan yuklash, takrorlarni birlashtirish
 lib/stats.js      KPI, plan, reyting hisoblari
-lib/db.js         ombor: JSON fayl (kompyuter) yoki Upstash Redis (Vercel)
+lib/db.js         ombor: JSON fayl (kompyuter) yoki Supabase / Upstash Redis (Vercel)
 public/           dashboard (HTML/CSS/JS)
 ```

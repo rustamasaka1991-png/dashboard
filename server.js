@@ -66,6 +66,11 @@ class HttpError extends Error {
 }
 
 function send(res, status, data) {
+  // API javobi ma'lumot omborga yozilgandan keyingina yuboriladi (handler'ga qarang)
+  if (res.deferSend) {
+    res.pending = { status, data };
+    return;
+  }
   const body = JSON.stringify(data);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(body);
@@ -458,13 +463,16 @@ async function handler(req, res) {
     if (url.pathname.startsWith('/api/')) {
       await db.refresh();
       sync.restoreStatus();
-      try {
-        await api(req, res, url);
-      } finally {
-        await db.flush();
-      }
+      res.deferSend = true;
+      await api(req, res, url);
+      // avval saqlaymiz, keyin javob beramiz: "Saqlandi" degan javob faqat haqiqatan yozilgan bo'lsa ketadi
+      await db.flush();
+      res.deferSend = false;
+      if (res.pending) send(res, res.pending.status, res.pending.data);
     } else serveStatic(req, res, url);
   } catch (err) {
+    res.deferSend = false;
+    db.reset();
     // status'siz xato — kutilmagan ichki xato: tafsiloti faqat server oynasiga yoziladi
     if (!err.status) console.error('[server]', req.method, req.url, err.stack || err.message);
     if (!res.headersSent) send(res, err.status || 500, { error: err.status ? err.message : 'Serverda ichki xato' });
