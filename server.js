@@ -188,6 +188,7 @@ function applySettings(current, body) {
   }
   if (Array.isArray(body.daysOff)) s.daysOff = [...new Set(body.daysOff.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))];
   if (['all', 'outbound', 'inbound'].includes(body.callDirection)) s.callDirection = body.callDirection;
+  if (['talked', 'all'].includes(body.callCount)) s.callCount = body.callCount;
   if (['manual', 'auto'].includes(body.conversionSource)) s.conversionSource = body.conversionSource;
   for (const group of ['plans', 'weights']) {
     if (body[group] && typeof body[group] === 'object') {

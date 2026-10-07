@@ -338,3 +338,8 @@ table.days input::placeholder { color: #7fa08c; }
 /* tahrirlanadigan sarlavha o'ramida rang buzilmasin: faqat oxirgi so'z yashil */
 .title h1 > span.ed { color: var(--text); }
 .title h1 > span.ed > span { color: var(--green); }
+
+/* birinchi ustun nimani sanashi (gaplashilgan / barcha qo'ng'iroqlar) */
+.mode-pick { display: block; margin: 3px auto 0; max-width: 100%; font: inherit; font-size: 10.5px; font-weight: 700; color: #0d6b2d; background: #dbf5e2; border: 1px solid #9fd4ae; border-radius: 6px; padding: 1px 4px; cursor: pointer; }
+.col-head small.mode-note { color: #0d6b2d; font-weight: 800; }
+body.tv .mode-pick { display: none; }

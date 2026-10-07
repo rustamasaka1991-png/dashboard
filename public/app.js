@@ -128,9 +128,12 @@ function lineText(k, b, isPeriod, cur, wrap = (x) => x) {
   const p = b.plan[k];
   switch (k) {
     case 'calls': {
-      // real aloqa — suhbat bo'lgan qo'ng'iroqlar; yonida jami terilgan qo'ng'iroqlar soni
-      const all = b.values.attempts ? ` <em title="Jami qo'ng'iroqlar: javobsiz va qisqa suhbatlar bilan birga">· jami ${intFmt(b.values.attempts)}</em>` : '';
-      return `${wrap(fmtVal(k, v))} <span>/ ${intFmt(p)}</span>${all}`;
+      // asosiy raqam — sozlamada tanlangani (gaplashilgan yoki barcha qo'ng'iroqlar); yonida ikkinchisi
+      const countAll = lastSettings?.callCount === 'all';
+      const other = countAll
+        ? ` <em title="Shulardan suhbat bo'lganlari (javob berilgan)">· gaplashilgan ${intFmt(b.values.talked || 0)}</em>`
+        : b.values.attempts ? ` <em title="Barcha qo'ng'iroqlar: javobsizlari bilan birga">· jami ${intFmt(b.values.attempts)}</em>` : '';
+      return `${wrap(fmtVal(k, v))} <span>/ ${intFmt(p)}</span>${other}`;
     }
     case 'talkMin': return `${wrap(fmtVal(k, v))} <span>/ ${intFmt(p)} min</span>`;
     case 'script': return `${wrap(fmtVal(k, v))} <span>/ ${isPeriod ? '≥' + p + " (o'rtacha)" : p}</span>`;
@@ -346,6 +349,13 @@ function bindFilters(rerender) {
   $('#fSort')?.addEventListener('change', (e) => { ui.sort = e.target.value; saveUi(); rerender(); });
   $('#refreshBtn')?.addEventListener('click', () => rerender({ fresh: true }));
   $('#addEmpBtn')?.addEventListener('click', () => employeeForm());
+  $('#callCountPick')?.addEventListener('change', async (e) => {
+    try {
+      await api('/api/settings', { method: 'PUT', body: { callCount: e.target.value } });
+      await rerender({ fresh: true });
+      toast('Saqlandi ✓');
+    } catch (err) { toast(err.message, true); }
+  });
   const menu = $('#empMenu');
   $('#empBtn')?.addEventListener('click', (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; });
   menu?.addEventListener('click', (e) => e.stopPropagation());
@@ -394,8 +404,10 @@ async function loadDash(view, paint, { fresh = false } = {}) {
   if (current !== view || editing() || dashQuery() !== key) return;
   paint(d, view + key);
 }
+let lastSettings = null;
 function paintCommon(d, tag) {
   lastDash = d;
+  lastSettings = d.settings;
   tzOffsetH = Number.isFinite(d.tzOffsetHours) ? d.tzOffsetHours : tzOffsetH;
   employeesCache = d.employees || [];
   $('#view').dataset.dash = tag;
@@ -463,7 +475,13 @@ function boardHtml(d) {
   }
   // Sarlavhalar
   html += `<div class="cell col-head">XODIM<small>Reyting: ${PL.toLowerCase()} ball</small></div>`;
-  for (const c of COLS) html += `<div class="cell col-head">${c.short}<small>${single ? `${dayLbl.toLowerCase()} natija / plan` : `↑ ${dayLbl.toLowerCase()} · ↓ ${PL.toLowerCase()} natija / plan`}</small></div>`;
+  for (const c of COLS) {
+    // birinchi ustun nimani sanashi: admin shu yerning o'zida almashtiradi
+    const mode = c.k !== 'calls' ? '' : canEdit()
+      ? `<select class="mode-pick" id="callCountPick" title="Bu ustun nimani sanaydi"><option value="talked" ${s.callCount === 'all' ? '' : 'selected'}>faqat gaplashilgan qo'ng'iroqlar</option><option value="all" ${s.callCount === 'all' ? 'selected' : ''}>barcha qo'ng'iroqlar (javobsizlari bilan)</option></select>`
+      : `<small class="mode-note">${s.callCount === 'all' ? "barcha qo'ng'iroqlar (javobsizlari bilan)" : "faqat gaplashilgan qo'ng'iroqlar"}</small>`;
+    html += `<div class="cell col-head">${c.short}${mode}<small>${single ? `${dayLbl.toLowerCase()} natija / plan` : `↑ ${dayLbl.toLowerCase()} · ↓ ${PL.toLowerCase()} natija / plan`}</small></div>`;
+  }
 
   // Xodimlar
   const rows = [...d.rows];
@@ -800,6 +818,10 @@ async function renderSettings() {
     <h3>Hisoblash qoidalari</h3>
     <div class="grid-form">
       <label class="field">Gaplashilgan qo'ng'iroq: suhbat kamida (sekund)${num('minTalkSec', s.minTalkSec, 1)}<span class="hint">0 — javob berilgan har qanday qo'ng'iroq sanaladi. Masalan 30 yozsangiz, 30 soniyadan qisqa suhbatlar sanalmaydi. O'zgartirsangiz, oy boshidan qayta sanaladi.</span></label>
+      <label class="field">Birinchi ustun nimani sanaydi<select class="input" id="callCount">
+        <option value="talked" ${s.callCount === 'all' ? '' : 'selected'}>Faqat gaplashilgan qo'ng'iroqlar</option>
+        <option value="all" ${s.callCount === 'all' ? 'selected' : ''}>Barcha qo'ng'iroqlar (javobsizlari bilan)</option></select>
+        <span class="hint">OnlinePBX panelidagi umumiy son — barcha qo'ng'iroqlar. Doskada ikkala son ham ko'rinadi; bu yerda qaysi biri plan bilan solishtirilishi tanlanadi.</span></label>
       <label class="field">Hisoblanadigan qo'ng'iroqlar<select class="input" id="callDirection">
         <option value="all" ${s.callDirection === 'all' ? 'selected' : ''}>Hammasi (kiruvchi + chiquvchi)</option>
         <option value="outbound" ${s.callDirection === 'outbound' ? 'selected' : ''}>Faqat chiquvchi</option>
@@ -905,7 +927,7 @@ async function renderSettings() {
     daysOff: $$('#daysOff input:checked').map((o) => Number(o.value)),
     dailyBonus: n('dailyBonus'), dailyBonusText: n('dailyBonusText'), monthlyBonusText: n('monthlyBonusText'),
     companyName: n('companyName'), companyTagline: n('companyTagline'), title: n('title'), subtitle: n('subtitle'), currency: n('currency'),
-    scoreCap: n('scoreCap'), minTalkSec: n('minTalkSec'), callDirection: n('callDirection'), conversionSource: n('conversionSource'), syncMinutes: n('syncMinutes'),
+    scoreCap: n('scoreCap'), minTalkSec: n('minTalkSec'), callDirection: n('callDirection'), callCount: n('callCount'), conversionSource: n('conversionSource'), syncMinutes: n('syncMinutes'),
   }));
   const pbxBody = () => ({ pbx: { domain: n('pbxDomain'), apiKey: n('pbxKey'), baseUrl: n('pbxBase') } });
   const amoBody = () => ({ amo: { subdomain: n('amoSub'), baseDomain: n('amoBase'), token: n('amoToken'), pipelineId: n('amoPipe'), wonStatusId: n('amoWon'), wonStatusIds: n('amoWonIds'), priceDivisor: n('amoDiv') } });

@@ -285,3 +285,23 @@ test("ichki raqam egasi amoCRM'dagi qo'ng'iroq yozuvlaridan aniqlanadi", () => {
   assert.deepStrictEqual([added.amoUserId, added.extensions.join(), added.active], ['5', '105,107', true]);
   assert.ok(!state.employees.some((e) => e.name === 'Direktor'));
 });
+
+test("birinchi KPI: gaplashilgan yoki barcha qo'ng'iroqlar (sozlamaga qarab)", () => {
+  const state = db.get();
+  const e = state.employees[0];
+  state.settings.conversionSource = 'manual';
+  state.auto['2027-01-05'] = { [e.id]: { calls: 31, attempts: 80, talkSec: 6600 } };
+  state.settings.callCount = 'talked';
+  let v = stats.dayValues(state, '2027-01-05', e.id);
+  assert.deepStrictEqual([v.calls, v.talked, v.attempts], [31, 31, 80]);
+  state.settings.callCount = 'all';
+  v = stats.dayValues(state, '2027-01-05', e.id);
+  assert.deepStrictEqual([v.calls, v.talked, v.attempts], [80, 31, 80]);
+  const agg = stats.aggregate(state, e.id, '2027-01-05', '2027-01-05');
+  assert.deepStrictEqual([agg.calls, agg.talked, agg.attempts], [80, 31, 80]);
+  // qo'lda kiritilgan qiymat baribir ustun
+  state.entries['2027-01-05'] = { [e.id]: { calls: 50 } };
+  assert.strictEqual(stats.dayValues(state, '2027-01-05', e.id).calls, 50);
+  delete state.entries['2027-01-05'];
+  state.settings.callCount = 'talked';
+});
