@@ -126,3 +126,49 @@ test("so'rov bo'yicha sinxronizatsiya: ulanmagan bo'lsa ishlamaydi, ulangan va e
     global.fetch = kvFetch;
   }
 });
+
+test("eski sozlama (30 soniya) bir marta yangilanadi va oy boshidan qayta sanaladi", async () => {
+  const D = require('../lib/dates');
+  // v3 dan oldin saqlangan holat: chegara 30 soniya, bitta xodim 100 raqami bilan
+  const core = read('core');
+  core.settings.v = 2;
+  core.settings.minTalkSec = 30;
+  core.settings.pbx = { domain: 'pbx1.onpbx.ru', apiKey: 'k', baseUrl: 'https://api2.onlinepbx.ru' };
+  core.employees = [{ id: 'aaa111', name: 'Asadbek', extensions: ['100'], amoUserId: '', active: true }];
+  write('core', core);
+  const auto = read('auto');
+  auto.syncLog = { lastRun: new Date().toISOString(), lastOk: {}, lastError: {} }; // "yangi" — odatda sinxronlash shart bo'lmasdi
+  write('auto', auto);
+
+  const kvFetch = global.fetch;
+  const historyDays = [];
+  global.fetch = async (url, opts) => {
+    if (!String(url).startsWith('https://api2.onlinepbx.ru')) return kvFetch(url, opts);
+    if (url.endsWith('search.json')) historyDays.push(D.dateOfUnix(Number(new URLSearchParams(String(opts.body)).get('start_stamp_from'))));
+    const data = url.endsWith('auth.json') ? { key_id: 'id', key: 'sec' } : url.endsWith('user/get.json') ? [{ num: '100', name: '' }]
+      : [
+        { uuid: 'x1', accountcode: 'outbound', user_talk_time: 12, events: [{ type: 'user', number: '100' }] }, // qisqa, lekin gaplashilgan
+        { uuid: 'x2', accountcode: 'outbound', user_talk_time: 95, events: [{ type: 'user', number: '100' }] },
+        { uuid: 'x3', accountcode: 'outbound', user_talk_time: 0, events: [{ type: 'user', number: '100' }] }, // javobsiz
+      ];
+    return { ok: true, status: 200, text: async () => JSON.stringify({ status: '1', data }) };
+  };
+  try {
+    const d = (await call('GET', '/api/dashboard')).json;
+    assert.strictEqual(d.settings.minTalkSec, 0);
+    assert.strictEqual(d.sync.stale, true, 'qayta sanash kutilayotgani uchun');
+    assert.deepStrictEqual([read('core').settings.v, read('core').settings.minTalkSec, read('auto').syncLog.resyncFrom], [3, 0, 'month']);
+
+    const r = (await call('POST', '/api/sync/auto')).json;
+    assert.ok(r.ok && r.result.pbx.ok, JSON.stringify(r));
+    const today = D.today();
+    const monthStart = today.slice(0, 8) + '01';
+    assert.strictEqual(historyDays.filter((x) => x >= monthStart).length >= D.daysBetween(monthStart, today), true, 'oy boshidan har bir kun qayta yuklanishi kerak');
+    const after = read('auto');
+    assert.strictEqual(after.syncLog.resyncFrom, undefined);
+    assert.deepStrictEqual([after.auto[today].aaa111.calls, after.auto[today].aaa111.attempts], [2, 3]); // 12 soniyalik suhbat ham sanaldi
+    assert.strictEqual((await call('POST', '/api/sync/auto')).json.skipped, 'fresh');
+  } finally {
+    global.fetch = kvFetch;
+  }
+});

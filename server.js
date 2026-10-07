@@ -311,8 +311,11 @@ async function api(req, res, url) {
   if (route === 'GET /api/settings') return send(res, 200, publicSettings(state.settings));
   if (route === 'PUT /api/settings') {
     requireAdmin(req);
+    const before = state.settings;
     state.settings = applySettings(state.settings, await readBody(req));
     db.saveNow('core');
+    // qo'ng'iroqlarni sanash qoidasi o'zgarsa, oy boshidan qayta sanaladi (keyingi sinxronizatsiyada)
+    if (before.minTalkSec !== state.settings.minTalkSec || before.callDirection !== state.settings.callDirection) sync.requestResync();
     // aniqlab bo'lmasa saqlash to'xtamaydi — sababi "amoCRM'ni tekshirish"da ko'rsatiladi
     await ensureAmoSubdomain(state).catch(() => {});
     sync.startScheduler();

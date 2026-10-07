@@ -71,7 +71,7 @@ hech qachon qaytarilmaydi.
 
 | KPI | Manba | Davr bo'yicha |
 | --- | --- | --- |
-| Real aloqa | OnlinePBX: suhbat ≥ `minTalkSec` (default 30 s) bo'lgan qo'ng'iroqlar | yig'indi |
+| Real aloqa (gaplashilgan) | OnlinePBX: javob berilgan qo'ng'iroqlar — kiruvchi ham, chiquvchi ham (xohlasangiz Sozlamalarda eng qisqa suhbat uzunligini qo'ying) | yig'indi |
 | Suhbat vaqti | OnlinePBX: `user_talk_time` yig'indisi | yig'indi |
 | Skript bali | qo'lda | o'rtacha |
 | Konversiya | o'zi hisoblanadi: sotuvlar soni / real aloqa (qo'lda kiritilsa — o'sha) | qo'lda: o'rtacha; avto: jami sotuv / jami aloqa |

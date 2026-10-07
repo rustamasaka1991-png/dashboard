@@ -799,7 +799,7 @@ async function renderSettings() {
       <label class="field">Bitta KPI uchun maks. foiz${num('scoreCap', s.scoreCap)}</label></div>
     <h3>Hisoblash qoidalari</h3>
     <div class="grid-form">
-      <label class="field">Real aloqa: suhbat kamida (sekund)${num('minTalkSec', s.minTalkSec, 1)}</label>
+      <label class="field">Gaplashilgan qo'ng'iroq: suhbat kamida (sekund)${num('minTalkSec', s.minTalkSec, 1)}<span class="hint">0 — javob berilgan har qanday qo'ng'iroq sanaladi. Masalan 30 yozsangiz, 30 soniyadan qisqa suhbatlar sanalmaydi. O'zgartirsangiz, oy boshidan qayta sanaladi.</span></label>
       <label class="field">Hisoblanadigan qo'ng'iroqlar<select class="input" id="callDirection">
         <option value="all" ${s.callDirection === 'all' ? 'selected' : ''}>Hammasi (kiruvchi + chiquvchi)</option>
         <option value="outbound" ${s.callDirection === 'outbound' ? 'selected' : ''}>Faqat chiquvchi</option>

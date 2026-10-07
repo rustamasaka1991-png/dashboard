@@ -175,6 +175,7 @@ test('OnlinePBX sinxronizatsiyasi (mock)', async () => {
   a.extensions = ['101'];
   b.extensions = ['102'];
   state.settings.pbx = { domain: 'pbx1.onpbx.ru', apiKey: 'k', baseUrl: 'https://api2.onlinepbx.ru' };
+  state.settings.minTalkSec = 30; // bu testda: 30 soniyadan qisqa suhbat "real aloqa" emas
   const calls = [
     { accountcode: 'outbound', caller_id_number: '101', destination_number: '998901112233', user_talk_time: 120 },
     { accountcode: 'outbound', caller_id_number: '101', destination_number: '998901112234', user_talk_time: 10 },
@@ -275,4 +276,12 @@ test("ichki raqam egasi amoCRM'dagi qo'ng'iroq yozuvlaridan aniqlanadi", () => {
   ];
   assert.deepStrictEqual(roster.linkExtensions(state, votes, ['100', '101', '102', '103', '104']), ['100 → Asadbek', '101 → Maloxat']);
   assert.deepStrictEqual(state.employees.map((e) => e.extensions.join()), ['100', '101', '']);
+
+  // Ro'yxatda yo'q (avval o'chirilgan) sotuvchi raqamdan faol qo'ng'iroq qilyapti — u qayta qo'shiladi; rahbar esa yo'q
+  const amoUsers = [{ id: 5, name: 'Toxirova Maloxat', role: 'Sotuvchi' }, { id: 6, name: 'Direktor', admin: true }];
+  const more = [...vote('105', '5', true, 6), ...vote('106', '6', true, 8), ...vote('107', '5', false, 9)];
+  assert.deepStrictEqual(roster.linkExtensions(state, more, ['105', '106', '107'], amoUsers), ["105 → Toxirova Maloxat (qayta qo'shildi)", '107 → Toxirova Maloxat']);
+  const added = state.employees.find((e) => e.name === 'Toxirova Maloxat');
+  assert.deepStrictEqual([added.amoUserId, added.extensions.join(), added.active], ['5', '105,107', true]);
+  assert.ok(!state.employees.some((e) => e.name === 'Direktor'));
 });
