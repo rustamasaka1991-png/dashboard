@@ -12,6 +12,7 @@ process.env.VERCEL = '1';
 process.env.SUPABASE_URL = 'https://proj.supabase.co/';
 process.env.SUPABASE_SECRET_KEY = 'sb_secret_test';
 process.env.ADMIN_PASSWORD = 'vercel-parol';
+process.env.STATE_CACHE_MS = '0'; // har so'rovda ombordan o'qish (keshlash alohida testda)
 
 const rows = new Map(); // key -> { value, updated_at }
 let mode = 'ok'; // 'ok' | 'no-table' | 'rls'
@@ -113,7 +114,7 @@ test("Supabase: sinxronizatsiya qulfi (band bo'lsa o'tkazib yuboriladi, eskirgan
   try {
     // boshqa nusxa hozirgina qulflagan
     rows.set('uzgrow:lock:sync', { value: '1', updated_at: new Date().toISOString() });
-    assert.deepStrictEqual((await call('POST', '/api/sync/auto')).json, { skipped: 'running' });
+    assert.strictEqual((await call('POST', '/api/sync/auto')).json.skipped, 'running');
     // qulf 10 daqiqa oldin qolib ketgan (funksiya uzilib qolgan) — olib tashlanadi va sinxronizatsiya ishlaydi
     rows.set('uzgrow:lock:sync', { value: '1', updated_at: new Date(Date.now() - 600000).toISOString() });
     const r = (await call('POST', '/api/sync/auto')).json;

@@ -32,6 +32,8 @@ const PORT = Number(process.env.PORT) || 3000;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
 const PUBLIC = path.join(__dirname, 'public');
 const MAX_BODY = 3 * 1024 * 1024;
+// Serverless nusxa xotirasidagi holat shuncha vaqt qayta o'qilmasdan ishlatiladi
+const STATE_CACHE_MS = Number(process.env.STATE_CACHE_MS ?? 15000);
 
 const sha256 = (v) => crypto.createHash('sha256').update(String(v)).digest();
 // Uzunligi har xil satrlarni ham vaqt bo'yicha xavfsiz solishtirish
@@ -72,9 +74,19 @@ function send(res, status, data) {
     return;
   }
   const body = JSON.stringify(data);
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  const t = db.timing;
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': (status === 200 && res.cacheControl) || 'no-store',
+    'X-Rev': String(db.getRev()),
+    'Server-Timing': `db-read;dur=${t.read}, db-write;dur=${t.write}, total;dur=${Date.now() - (res.startedAt || Date.now())}`,
+  });
   res.end(body);
 }
+
+// Xodim rasmi (data URL) alohida, uzoq keshlanadigan manzildan beriladi — dashboard javobi yengil bo'lishi uchun
+const photoTag = (photo) => crypto.createHash('sha1').update(photo).digest('hex').slice(0, 10);
+const photoUrl = (e) => (String(e.photo || '').startsWith('data:') ? `/api/photo/${e.id}?v=${photoTag(e.photo)}` : e.photo || '');
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -274,8 +286,14 @@ async function api(req, res, url) {
   if (route === 'GET /api/dashboard') {
     const ids = q.ids ? q.ids.split(',').filter(Boolean) : null;
     const data = stats.dashboard(state, { date: q.date, period: q.period, from: q.from, to: q.to, ids });
+    for (const r of data.rows) r.photo = photoUrl(r);
+    // Vercel'da javobni CDN qisqa muddat keshlaydi: tomoshabinlar (TV) funksiyani kutmaydi.
+    // Admin so'rovlari (Authorization bilan) va "_rev" qo'shilgan so'rovlar keshdan o'tmaydi.
+    if (db.SERVERLESS && !q._rev) res.cacheControl = 'public, s-maxage=20, stale-while-revalidate=40';
     return send(res, 200, {
       ...data,
+      rev: db.getRev(),
+      employees: state.employees.filter((e) => e.active !== false).map((e) => ({ id: e.id, name: e.name })),
       today: D.today(),
       tzOffsetHours: D.OFFSET_H,
       settings: publicSettings(state.settings),
@@ -296,7 +314,15 @@ async function api(req, res, url) {
 
   if (route === 'GET /api/employees') {
     const admin = isAdmin(req);
-    return send(res, 200, state.employees.map((e) => (admin ? e : { id: e.id, name: e.name, role: e.role, photo: e.photo, active: e.active })));
+    return send(res, 200, state.employees.map((e) => (admin ? e : { id: e.id, name: e.name, role: e.role, photo: photoUrl(e), active: e.active })));
+  }
+  const photoMatch = req.method === 'GET' && url.pathname.match(/^\/api\/photo\/([a-z0-9]+)$/);
+  if (photoMatch) {
+    const m = String(state.employees.find((e) => e.id === photoMatch[1])?.photo || '').match(/^data:(image\/[a-z+]+);base64,(.+)$/);
+    if (!m) throw new HttpError(404, 'Rasm topilmadi');
+    res.deferSend = false;
+    res.writeHead(200, { 'Content-Type': m[1], 'Cache-Control': 'public, max-age=31536000, immutable' });
+    return res.end(Buffer.from(m[2], 'base64'));
   }
   if (route === 'POST /api/employees') {
     requireAdmin(req);
@@ -387,7 +413,10 @@ async function api(req, res, url) {
   }
   if (route === 'GET /api/sync') return send(res, 200, sync.status);
   // Ochiq turgan dashboard va Vercel Cron chaqiradi: ma'lumot eskirgan bo'lsagina bugun va kechani yangilaydi
-  if (route === 'GET /api/sync/auto' || route === 'POST /api/sync/auto') return send(res, 200, await sync.autoSync());
+  if (route === 'GET /api/sync/auto' || route === 'POST /api/sync/auto') {
+    const r = await sync.autoSync();
+    return send(res, 200, { ...r, rev: db.getRev() });
+  }
 
   // Zaxira nusxa: butun ma'lumotni (sozlamalar, kalitlar, xodimlar, statistika) yuklab olish va tiklash.
   // Kompyuterdagi ma'lumotni Vercel'ga ko'chirish ham shu orqali.
@@ -463,7 +492,11 @@ async function handler(req, res) {
       throw new HttpError(400, "Manzil noto'g'ri");
     }
     if (url.pathname.startsWith('/api/')) {
-      await db.refresh();
+      res.startedAt = Date.now();
+      // Brauzer o'zi ko'rgan eng yangi versiyani yuboradi; xotiradagi nusxa undan eski bo'lmasa va yaqinda
+      // o'qilgan bo'lsa, ombor qayta o'qilmaydi. Yozuvchi so'rovlar uchun muddat qisqaroq.
+      const minRev = Math.max(Number(req.headers['x-rev']) || 0, Number(url.searchParams.get('_rev')) || 0);
+      await db.refresh({ minRev, maxAgeMs: req.method === 'GET' ? STATE_CACHE_MS : Math.min(STATE_CACHE_MS, 5000) });
       sync.restoreStatus();
       res.deferSend = true;
       await api(req, res, url);

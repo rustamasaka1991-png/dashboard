@@ -12,6 +12,7 @@ process.env.VERCEL = '1';
 process.env.KV_REST_API_URL = 'https://kv.test';
 process.env.KV_REST_API_TOKEN = 'kv-token';
 process.env.ADMIN_PASSWORD = 'vercel-parol';
+process.env.STATE_CACHE_MS = '0'; // har so'rovda ombordan o'qish (keshlash alohida testda)
 
 const store = new Map();
 const commands = [];
@@ -97,7 +98,7 @@ test("zaxira nusxa: yuklab olish va tiklash", async () => {
 });
 
 test("so'rov bo'yicha sinxronizatsiya: ulanmagan bo'lsa ishlamaydi, ulangan va eskirgan bo'lsa ishlaydi", async () => {
-  assert.deepStrictEqual((await call('POST', '/api/sync/auto')).json, { skipped: 'not-configured' });
+  assert.strictEqual((await call('POST', '/api/sync/auto')).json.skipped, 'not-configured');
 
   const core = read('core');
   core.settings.pbx = { domain: 'pbx1.onpbx.ru', apiKey: 'k', baseUrl: 'https://api2.onlinepbx.ru' };
@@ -120,7 +121,7 @@ test("so'rov bo'yicha sinxronizatsiya: ulanmagan bo'lsa ishlamaydi, ulangan va e
     assert.ok(auto.syncLog.lastRun);
     assert.strictEqual(Object.values(auto.auto).filter((day) => day[empId]?.calls === 1).length, 2); // kecha va bugun
     assert.strictEqual((await call('GET', '/api/dashboard')).json.sync.stale, false);
-    assert.deepStrictEqual((await call('POST', '/api/sync/auto')).json, { skipped: 'fresh' });
+    assert.strictEqual((await call('POST', '/api/sync/auto')).json.skipped, 'fresh');
   } finally {
     global.fetch = kvFetch;
   }

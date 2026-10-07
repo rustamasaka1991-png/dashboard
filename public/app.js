@@ -25,12 +25,16 @@ function saveUi() {
   try { localStorage.setItem('uzg.ui', JSON.stringify({ period: ui.period, from: ui.from, to: ui.to, ids: ui.ids, sort: ui.sort })); } catch { /* */ }
 }
 
+// Server har javobda ma'lumot versiyasini (X-Rev) qaytaradi. Biz ko'rgan eng yangi versiyani keyingi
+// so'rovlarda yuboramiz — server shundan eski nusxa bilan javob bermaydi (o'zgartirish darhol ko'rinadi).
+let lastRev = 0;
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     method: opts.method || 'GET',
-    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+    headers: { 'Content-Type': 'application/json', ...(lastRev ? { 'X-Rev': String(lastRev) } : {}), ...(token ? { Authorization: 'Bearer ' + token } : {}) },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
+  lastRev = Math.max(lastRev, Number(res.headers.get('X-Rev')) || 0);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     if (res.status === 401 && token && path !== '/api/login') {
@@ -116,31 +120,128 @@ const COLS = [
   { k: 'sales', title: '5. SOTUV SUMMASI', short: 'SOTUV SUMMASI', icon: 'bars', planFmt: null, sub: '(kamida)' },
 ];
 
-function lineText(k, b, isPeriod, cur) {
+// wrap — qiymatni o'rab beruvchi funksiya (admin uchun: ustiga bosib tahrirlash)
+function lineText(k, b, isPeriod, cur, wrap = (x) => x) {
   const v = b.values[k];
   const p = b.plan[k];
   switch (k) {
-    case 'calls': return `${fmtVal(k, v)} <span>/ ${intFmt(p)}</span>`;
-    case 'talkMin': return `${fmtVal(k, v)} <span>/ ${intFmt(p)} min</span>`;
-    case 'script': return `${fmtVal(k, v)} <span>/ ${isPeriod ? '≥' + p + " (o'rtacha)" : p}</span>`;
-    case 'conversion': return `${fmtVal(k, v)} <span>/ ${p}%</span>`;
-    case 'sales': return `${fmtVal(k, v, cur)} <span>/ ${money(p, cur)}</span>`;
+    case 'calls': {
+      // real aloqa — suhbat bo'lgan qo'ng'iroqlar; yonida jami terilgan qo'ng'iroqlar soni
+      const all = b.values.attempts ? ` <em title="Jami qo'ng'iroqlar: javobsiz va qisqa suhbatlar bilan birga">· jami ${intFmt(b.values.attempts)}</em>` : '';
+      return `${wrap(fmtVal(k, v))} <span>/ ${intFmt(p)}</span>${all}`;
+    }
+    case 'talkMin': return `${wrap(fmtVal(k, v))} <span>/ ${intFmt(p)} min</span>`;
+    case 'script': return `${wrap(fmtVal(k, v))} <span>/ ${isPeriod ? '≥' + p + " (o'rtacha)" : p}</span>`;
+    case 'conversion': return `${wrap(fmtVal(k, v))} <span>/ ${p}%</span>`;
+    case 'sales': return `${wrap(fmtVal(k, v, cur))} <span>/ ${money(p, cur)}</span>`;
     default: return '';
   }
 }
+
+/* ================= ustiga bosib tahrirlash (faqat admin) ================= */
+const canEdit = () => isAdmin && !document.body.classList.contains('tv');
+const editing = () => Boolean($('.ed-input'));
+
+// Tahrirlanadigan joy: admin bo'lsa bosiladigan qilib o'raladi, aks holda o'zgarishsiz qaytadi.
+// kind: plan (kunlik plan) | set (sozlama) | entry (xodimning kunlik natijasi: "empId:maydon")
+function ed(kind, key, raw, inner, { type = 'num', title = "Bosib o'zgartiring", cls = '' } = {}) {
+  if (!canEdit()) return inner;
+  return `<span class="ed ${cls}" data-ed="${kind}" data-key="${esc(key)}" data-raw="${esc(raw ?? '')}" data-type="${type}" title="${esc(title)}">${inner}</span>`;
+}
+
+// "1 250", "$1,250", "2,5%" kabi yozuvlarni songa aylantirish
+function cleanNumber(text) {
+  let t = text.replace(/[\s$%]/g, '').replace(/[^\d.,-]/g, '');
+  t = /^-?\d{1,3}(,\d{3})+$/.test(t) ? t.replace(/,/g, '') : t.replace(',', '.');
+  return t;
+}
+
+async function commitEdit({ ed: kind, key, type }, text) {
+  const v = type === 'num' ? cleanNumber(text) : text;
+  if (type === 'num' && v !== '' && !(Number.isFinite(Number(v)) && Number(v) >= 0)) throw new Error("Son kiriting (masalan: 70 yoki 2.5)");
+  if (kind === 'entry') {
+    const [employeeId, field] = key.split(':');
+    return api('/api/entries', { method: 'POST', body: { date: lastDash.date, rows: [{ employeeId, [field]: v }] } });
+  }
+  if (v === '' && type === 'num') throw new Error('Qiymat kiriting');
+  return api('/api/settings', { method: 'PUT', body: kind === 'plan' ? { plans: { [key]: v } } : { [key]: v } });
+}
+
+function startEdit(el) {
+  const { type, raw } = el.dataset;
+  const old = el.innerHTML;
+  const width = Math.min(Math.max(type === 'text' ? 170 : 74, el.offsetWidth + 26), 420);
+  el.classList.add('editing');
+  el.innerHTML = `<input class="ed-input" ${type === 'num' ? 'inputmode="decimal"' : ''} value="${esc(raw)}" style="width:${width}px">`;
+  const inp = el.firstChild;
+  inp.focus();
+  inp.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const val = inp.value.trim();
+    el.classList.remove('editing');
+    if (!save || val === raw) { el.innerHTML = old; return; }
+    el.innerHTML = '<span class="ed-wait">saqlanmoqda…</span>';
+    try {
+      await commitEdit(el.dataset, val);
+      await RENDER[current]({ fresh: true });
+      toast('Saqlandi ✓');
+    } catch (err) {
+      el.innerHTML = old;
+      toast(err.message, true);
+    }
+  };
+  inp.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') finish(true);
+    else if (ev.key === 'Escape') { ev.stopPropagation(); finish(false); }
+  });
+  inp.addEventListener('blur', () => finish(true));
+  inp.addEventListener('click', (ev) => ev.stopPropagation());
+}
+
+async function openEmployee(id) {
+  try {
+    const list = await api('/api/employees');
+    employeeForm(id ? list.find((e) => e.id === id) : null);
+  } catch (err) { toast(err.message, true); }
+}
+
+$('#view').addEventListener('click', (e) => {
+  if (!canEdit()) return;
+  const el = e.target.closest('.ed');
+  if (el) {
+    if (!el.classList.contains('editing')) startEdit(el);
+    return;
+  }
+  const emp = e.target.closest('[data-emp]');
+  if (emp) openEmployee(emp.dataset.emp);
+});
 
 const CUMULATIVE = ['calls', 'talkMin', 'sales'];
 
 // Foiz — natija / to'liq plan. Rang — davrning o'tgan qismiga nisbatan (pacePct):
 // oy o'rtasida grafikdan oldinda bo'lgan xodim yashil ko'rinadi. Chiziqcha — bugun qayerda bo'lish kerakligi.
-function mline(col, b, isPeriod, cur, pace = 1) {
+// empId berilsa (xodimning kunlik qatori) — qiymat ustiga bosib qo'lda kiritish mumkin
+function mline(col, b, isPeriod, cur, pace = 1, empId = '') {
   const pct = b.pct[col.k] || 0;
   const cls = pctClass(b.pacePct?.[col.k] ?? pct);
   const icon = col.k === 'sales' && !isPeriod ? ICON.coin : ICON[col.icon];
   const tick = isPeriod && pace > 0 && pace < 1 && CUMULATIVE.includes(col.k)
     ? `<u style="left:${(pace * 100).toFixed(1)}%" title="Bugungi kungacha reja: ${Math.round(pace * 100)}%"></u>` : '';
+  let wrap;
+  if (empId) {
+    const v = b.values[col.k];
+    const manual = (b.manual || []).includes(col.k);
+    const raw = v === null || v === undefined ? '' : col.k === 'conversion' ? Math.round(v * 10) / 10 : Math.round(v);
+    wrap = (inner) => ed('entry', `${empId}:${col.k}`, raw, inner, {
+      cls: manual ? 'man' : '',
+      title: manual ? "Qo'lda kiritilgan. Bosib o'zgartiring; bo'shatib Enter bossangiz avtomatik qiymat qaytadi" : "Bosib qo'lda kiriting",
+    });
+  }
   return `<div class="mline">
-    <div class="lbl">${icon}${lineText(col.k, b, isPeriod, cur)}</div>
+    <div class="lbl">${icon}${lineText(col.k, b, isPeriod, cur, wrap)}</div>
     <div class="pct c-${cls}">${Math.round(pct)}%</div>
     <div class="bar"><i class="b-${cls}" style="width:${Math.min(100, pct).toFixed(1)}%"></i>${tick}</div>
   </div>`;
@@ -170,6 +271,7 @@ function filtersHtml(d, { sort = true } = {}) {
       ${COLS.map((c) => `<option value="${c.k}" ${ui.sort === c.k ? 'selected' : ''}>Saralash: ${c.short.toLowerCase()}</option>`).join('')}
     </select>` : ''}
     <span class="grow"></span>
+    ${canEdit() ? '<span class="hint edit-hint">✎ Tahrirlash: raqam yoki yozuv ustiga bosing</span><button class="btn sm" id="addEmpBtn">+ Xodim</button>' : ''}
     <button class="btn ghost sm" id="refreshBtn">↻ Yangilash</button>
   </div>`;
 }
@@ -186,7 +288,8 @@ function bindFilters(rerender) {
   $('#fFrom')?.addEventListener('change', onRange);
   $('#fTo')?.addEventListener('change', onRange);
   $('#fSort')?.addEventListener('change', (e) => { ui.sort = e.target.value; saveUi(); rerender(); });
-  $('#refreshBtn')?.addEventListener('click', rerender);
+  $('#refreshBtn')?.addEventListener('click', () => rerender({ fresh: true }));
+  $('#addEmpBtn')?.addEventListener('click', () => employeeForm());
   const menu = $('#empMenu');
   $('#empBtn')?.addEventListener('click', (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; });
   menu?.addEventListener('click', (e) => e.stopPropagation());
@@ -203,6 +306,45 @@ function dashQuery() {
   return '/api/dashboard?' + q;
 }
 
+// Dashboard ma'lumoti: avval brauzerda saqlangan oxirgi nusxa darhol chiziladi, keyin serverdan yangisi keladi.
+// fresh = true (yoki admin) — CDN keshini chetlab, eng yangi ma'lumot so'raladi.
+let lastDash = null;
+let needFreshRev = 0;
+const DASH_CACHE = 'uzg.dash';
+function dashCached(key) {
+  return safeJson(localStorage.getItem(DASH_CACHE))[key]?.d || null;
+}
+function dashRemember(key, d) {
+  const all = safeJson(localStorage.getItem(DASH_CACHE));
+  all[key] = { t: Date.now(), d };
+  const keep = Object.entries(all).sort((a, b) => b[1].t - a[1].t).slice(0, 6);
+  try { localStorage.setItem(DASH_CACHE, JSON.stringify(Object.fromEntries(keep))); } catch { /* joy yetmasa — keshsiz */ }
+}
+async function loadDash(view, paint, { fresh = false } = {}) {
+  const key = dashQuery();
+  const shown = $('#view').dataset.dash === view + key;
+  const cached = !shown && dashCached(key);
+  if (cached) paint(cached, view + key);
+  const bypass = fresh || isAdmin || needFreshRev;
+  let d;
+  try {
+    d = await api(bypass ? `${key}&_rev=${Math.max(lastRev, needFreshRev, 1)}` : key);
+  } catch (err) {
+    if (cached || shown) return; // tarmoq xatosida ekrandagi ma'lumot qoladi
+    throw err;
+  }
+  needFreshRev = 0;
+  dashRemember(key, d);
+  if (current !== view || editing() || dashQuery() !== key) return;
+  paint(d, view + key);
+}
+function paintCommon(d, tag) {
+  lastDash = d;
+  tzOffsetH = Number.isFinite(d.tzOffsetHours) ? d.tzOffsetHours : tzOffsetH;
+  employeesCache = d.employees || [];
+  $('#view').dataset.dash = tag;
+}
+
 /* ================= DASHBOARD ================= */
 function headerHtml(s) {
   const now = nowParts();
@@ -210,8 +352,8 @@ function headerHtml(s) {
   const words = (s.title || '').trim().split(/\s+/);
   const last = words.length > 1 ? words.pop() : '';
   return `<header class="hdr">
-    <div class="logo">${LEAF_LOGO}<div><b>${esc(s.companyName)}</b><small>${esc(s.companyTagline)}</small></div></div>
-    <div class="title"><h1>${esc(words.join(' '))} <span>${esc(last)}</span></h1><p>${esc(s.subtitle)}</p></div>
+    <div class="logo">${LEAF_LOGO}<div><b>${ed('set', 'companyName', s.companyName, esc(s.companyName), { type: 'text' })}</b><small>${ed('set', 'companyTagline', s.companyTagline, esc(s.companyTagline), { type: 'text' })}</small></div></div>
+    <div class="title"><h1>${ed('set', 'title', s.title, `${esc(words.join(' '))} <span>${esc(last)}</span>`, { type: 'text' })}</h1><p>${ed('set', 'subtitle', s.subtitle, esc(s.subtitle), { type: 'text' })}</p></div>
     <div class="datebox">${ICON.calendar}<div><b>BUGUN</b><div class="big" id="hdrDate">${ld.day}</div><small id="hdrWd">${ld.wd}</small></div></div>
     <div class="clock" id="clock">${now.time}</div>
   </header>`;
@@ -224,9 +366,9 @@ function bonusHtml(d) {
     : '<span class="chip muted">Hozircha rejani to\'liq bajargan yo\'q</span>';
   const leader = d.monthLeader ? `<span class="chip">👑 ${esc(d.monthLeader.name)} — ${money(d.monthLeader.sales, s.currency)}</span>` : '<span class="chip muted">Hali sotuv yo\'q</span>';
   return `<section class="bonus-row">
-    <div class="bonus">${TROPHY('tg1')}<div><h3>KUNLIK BONUS</h3><div class="val">${esc(s.dailyBonus)}</div><p>${esc(s.dailyBonusText)}</p><div class="winners">${winners}</div></div></div>
-    <div class="bonus center"><div class="ico">${ICON.calendar}</div><div><h3>Oylik ish kuni</h3><div class="val">${s.workDaysPerMonth} kun</div><p>(1 oyda) · Hisobot davri: <b>${PERIOD_LABEL[d.period].toLowerCase()}</b>, ${d.workDays} ish kuni</p></div></div>
-    <div class="bonus"><div style="display:flex;align-items:center;gap:12px;flex:1">${TROPHY('tg2')}<div><h3 class="gold">OYLIK BONUS</h3><p>${esc(s.monthlyBonusText)}</p><div class="winners">${leader}</div></div></div>${CROWN_MONEY}</div>
+    <div class="bonus">${TROPHY('tg1')}<div><h3>KUNLIK BONUS</h3><div class="val">${ed('set', 'dailyBonus', s.dailyBonus, esc(s.dailyBonus), { type: 'text' })}</div><p>${ed('set', 'dailyBonusText', s.dailyBonusText, esc(s.dailyBonusText), { type: 'text' })}</p><div class="winners">${winners}</div></div></div>
+    <div class="bonus center"><div class="ico">${ICON.calendar}</div><div><h3>Oylik ish kuni</h3><div class="val">${ed('set', 'workDaysPerMonth', s.workDaysPerMonth, `${s.workDaysPerMonth} kun`)}</div><p>(1 oyda) · Hisobot davri: <b>${PERIOD_LABEL[d.period].toLowerCase()}</b>, ${d.workDays} ish kuni</p></div></div>
+    <div class="bonus"><div style="display:flex;align-items:center;gap:12px;flex:1">${TROPHY('tg2')}<div><h3 class="gold">OYLIK BONUS</h3><p>${ed('set', 'monthlyBonusText', s.monthlyBonusText, esc(s.monthlyBonusText), { type: 'text' })}</p><div class="winners">${leader}</div></div></div>${CROWN_MONEY}</div>
   </section>`;
 }
 
@@ -241,7 +383,7 @@ function boardHtml(d) {
   html += `<div class="cell plan-label">${ICON.user}<div><b>KUNLIK PLAN</b><small>(har bir xodim uchun)</small></div></div>`;
   for (const c of COLS) {
     const v = d.plans.day[c.k];
-    html += `<div class="cell plan-card">${ICON[c.icon]}<div class="txt"><div class="t">${c.title}</div><div class="v">${c.k === 'sales' ? money(v, cur) : c.planFmt(v)}</div><div class="s">${c.sub}</div></div></div>`;
+    html += `<div class="cell plan-card">${ICON[c.icon]}<div class="txt"><div class="t">${c.title}</div><div class="v">${ed('plan', c.k, v, c.k === 'sales' ? money(v, cur) : c.planFmt(v), { title: "Kunlik planni o'zgartirish" })}</div><div class="s">${c.sub}</div></div></div>`;
   }
   // Davr plani
   html += `<div class="cell period-plan label">${ICON.users.replace('<svg', '<svg style="color:#1b7a3b"')}<div><b>${PL} PLAN</b> <small>(${d.workDays} kun)</small></div></div>`;
@@ -267,8 +409,9 @@ function boardHtml(d) {
   }
   for (const r of rows) {
     const top = r.rank === 1 && r.score > 0;
-    html += `<div class="cell emp ${top ? 'first' : ''}">${avatar(r)}<div class="nm"><b title="${esc(r.name)}">${esc(r.name)}</b><small>${esc(r.role || '')}</small><span class="score">${Math.round(r.score)} ball · #${r.rank}</span></div>${r.rank <= 3 && r.score > 0 ? medal(r.rank) : ''}</div>`;
-    for (const c of COLS) html += `<div class="cell metric ${top ? 'first' : ''}">${mline(c, r.day, false, cur)}${mline(c, r.period, true, cur, d.pace)}</div>`;
+    const edit = canEdit() ? ` clickable" data-emp="${r.id}" title="Xodimni tahrirlash (ism, rasm, ichki raqam)` : '';
+    html += `<div class="cell emp ${top ? 'first' : ''}${edit}">${avatar(r)}<div class="nm"><b>${esc(r.name)}</b><small>${esc(r.role || '')}</small><span class="score">${Math.round(r.score)} ball · #${r.rank}</span></div>${r.rank <= 3 && r.score > 0 ? medal(r.rank) : ''}</div>`;
+    for (const c of COLS) html += `<div class="cell metric ${top ? 'first' : ''}">${mline(c, r.day, false, cur, 1, r.id)}${mline(c, r.period, true, cur, d.pace)}</div>`;
   }
   // Jami
   if (rows.length) {
@@ -283,7 +426,12 @@ function footHtml(d) {
   const sy = d.sync;
   const st = (on, ok, err) => (!on ? 'ulanmagan' : err ? 'xato: ' + esc(err) : ok ? 'oxirgi sinx.: ' + localParts(ok).time : 'kutilmoqda');
   const paceNote = d.pace < 1 ? ` · ${PERIOD_LABEL[d.period].toLowerCase()} qatorda rang bugungi kungacha bo'lgan rejaga nisbatan (chiziqcha = ${Math.round(d.pace * 100)}%)` : '';
-  return `<div class="footnote">
+  // Hech kimga bog'lanmagan ichki raqamlar — shu qo'ng'iroqlar doskada ko'rinmaydi
+  const free = (d.unassigned || []).filter((u) => u.attempts > 0);
+  const freeNote = free.length
+    ? `<div class="footnote warn">⚠ ${shortDate(d.date)} kuni ${free.map((u) => `<b>${esc(u.ext)}</b> raqamidan ${u.attempts} ta qo'ng'iroq (${u.calls} ta real aloqa)`).join(', ')} hech bir xodimga bog'lanmagan va doskada hisoblanmagan. ${canEdit() ? "Xodim ustiga bosib, unga shu ichki raqamni yozing." : ''}</div>`
+    : '';
+  return `${freeNote}<div class="footnote">
     <span>OnlinePBX: ${st(sy.pbx, sy.lastOk.pbx, sy.lastError.pbx)}</span>
     <span>amoCRM: ${st(sy.amo, sy.lastOk.amo, sy.lastError.amo)}</span>
     <span>Ranglar: ≥100% yashil · 65–99% sariq · &lt;65% qizil${paceNote}</span>
@@ -298,16 +446,15 @@ function updateSyncDot(sy) {
   dot.title = err ? 'Integratsiya xatosi: ' + err : sy.pbx || sy.amo ? 'Integratsiya ulangan' : 'Integratsiya ulanmagan (Sozlamalar)';
 }
 
-async function renderDashboard() {
-  const d = await api(dashQuery());
-  if (current !== 'dashboard') return;
-  tzOffsetH = Number.isFinite(d.tzOffsetHours) ? d.tzOffsetHours : tzOffsetH;
+function paintDashboard(d, tag) {
+  paintCommon(d, tag);
   $('#view').innerHTML = headerHtml(d.settings) + bonusHtml(d) + filtersHtml(d) + boardHtml(d) + footHtml(d);
   bindFilters(renderDashboard);
   updateSyncDot(d.sync);
   maybeAutoSync(d.sync, renderDashboard);
   fitTv();
 }
+const renderDashboard = (opts) => loadDash('dashboard', paintDashboard, opts);
 
 // Ma'lumot eskirgan bo'lsa (serverda fon jarayoni yo'q — masalan Vercel'da), ochiq turgan sahifa
 // sinxronizatsiyani o'zi boshlaydi va tugagach ekranni yangilaydi. Server ortiqcha ishlamaydi.
@@ -317,7 +464,11 @@ function maybeAutoSync(sy, rerender) {
   autoSyncAt = Date.now();
   fetch('/api/sync/auto', { method: 'POST' })
     .then((r) => (r.ok ? r.json() : null))
-    .then((r) => { if (r?.ok && (current === 'dashboard' || current === 'rating') && !ui.date) rerender().catch(() => {}); })
+    .then((r) => {
+      if (!r?.ok) return;
+      needFreshRev = Number(r.rev) || Date.now(); // keyingi so'rov keshdan emas, yangi ma'lumot bilan kelsin
+      if ((current === 'dashboard' || current === 'rating') && !ui.date && !editing()) rerender().catch(() => {});
+    })
     .catch(() => {});
 }
 
@@ -352,10 +503,9 @@ function spark(trend, cap) {
   return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><line x1="0" x2="${w}" y1="${y100}" y2="${y100}" stroke="rgba(255,255,255,.2)" stroke-dasharray="3 3"/><polyline points="${pts}" fill="none" stroke="#3ddc6a" stroke-width="2" stroke-linejoin="round"/></svg>`;
 }
 
-async function renderRating() {
-  const d = await api(dashQuery());
-  if (current !== 'rating') return;
-  tzOffsetH = Number.isFinite(d.tzOffsetHours) ? d.tzOffsetHours : tzOffsetH;
+const renderRating = (opts) => loadDash('rating', paintRating, opts);
+function paintRating(d, tag) {
+  paintCommon(d, tag);
   const s = d.settings, cur = s.currency, PL = PERIOD_LABEL[d.period];
   const top = d.rows.slice(0, 3);
   const order = [top[1], top[0], top[2]].filter(Boolean);
@@ -457,20 +607,23 @@ async function renderEmployees() {
       <button class="btn danger sm" data-del="${e.id}">O'chirish</button></div></div></div>`).join('') || '<div class="hint">Hali xodim yo\'q</div>'}</div>
   </div>`;
   $('#addEmp').addEventListener('click', () => employeeForm());
-  $('#importEmp').addEventListener('click', (ev) => withBtn(ev.target, async () => {
-    const r = await api('/api/employees/import', { method: 'POST', body: {} });
+  const runImport = (btn, force) => withBtn(btn, async () => {
+    const r = await api('/api/employees/import', { method: 'POST', body: { force } });
     const lines = [];
+    if (r.skipped?.length) lines.push(`Avval o'chirilgani uchun qo'shilmadi: <b>${esc(r.skipped.join(', '))}</b> <button class="btn ghost sm" id="importForce">Ularni ham qaytarish</button>`);
     if (r.added.length) lines.push(`<span class="c-green"><b>Qo'shildi (${r.added.length}):</b></span> ${esc(r.added.join(', '))}`);
     if (r.linked.length) lines.push(`<b>Mavjud xodimga biriktirildi (${r.linked.length}):</b> ${esc(r.linked.join(', '))}`);
     if (r.merged?.length) lines.push(`<b>Takrorlar birlashtirildi (${r.merged.length}):</b> ${esc(r.merged.join(', '))}`);
     if (r.extensions?.length) lines.push(`<span class="c-green"><b>Ichki raqamlar bog'landi:</b></span> ${esc(r.extensions.join(', '))}`);
-    if (!r.added.length && !r.linked.length && !r.merged?.length && !r.extensions?.length) lines.push("Yangi xodim topilmadi — ro'yxat allaqachon to'liq.");
+    if (!r.added.length && !r.linked.length && !r.merged?.length && !r.extensions?.length && !r.skipped?.length) lines.push("Yangi xodim topilmadi — ro'yxat allaqachon to'liq.");
     if (r.unlinked?.length) lines.push(`Egasi aniqlanmagan ichki raqamlar: <b>${esc(r.unlinked.join(', '))}</b> — oxirgi 7 kunda ulardan qo'ng'iroq bo'lmagan. Kimniki ekanini bilsangiz, xodimni tahrirlab qo'lda yozing.`);
     const SRC = { amo: 'amoCRM', pbx: 'OnlinePBX', link: "Ichki raqamlarni bog'lash" };
     for (const [src, msg] of Object.entries(r.errors || {})) lines.push(`<span class="c-red">${SRC[src] || src}: ${esc(msg)}</span>`);
     await renderEmployees();
     $('#importResult').innerHTML = `<p class="hint" style="margin:0 0 12px;font-size:13px">${lines.join('<br>')}</p>`;
-  }, '#importResult'));
+    $('#importForce')?.addEventListener('click', (e) => runImport(e.target, true));
+  }, '#importResult');
+  $('#importEmp').addEventListener('click', (ev) => runImport(ev.target, false));
   $$('[data-edit]').forEach((b) => b.addEventListener('click', () => employeeForm(employeesCache.find((e) => e.id === b.dataset.edit))));
   $$('[data-toggle]').forEach((b) => b.addEventListener('click', async () => {
     const e = employeesCache.find((x) => x.id === b.dataset.toggle);
@@ -512,7 +665,14 @@ function employeeForm(e = null) {
       <label class="field">amoCRM foydalanuvchi ID<input class="input" id="fAmo" value="${esc(e?.amoUserId || '')}" placeholder="masalan: 1234567"><span class="hint">Sozlamalar → "amoCRM'ni tekshirish" foydalanuvchilar ro'yxatini ID bilan ko'rsatadi.</span></label>
       <label style="display:flex;gap:8px;align-items:center;font-weight:600"><input type="checkbox" id="fActive" ${e?.active === false ? '' : 'checked'}> Faol (dashboardda ko'rinadi)</label>
     </div>
-    <div class="form-actions"><button class="btn ghost" id="fCancel">Bekor qilish</button><button class="btn" id="fSave">Saqlash</button></div>`);
+    <div class="form-actions">${e ? '<button class="btn danger" id="fDelete" style="margin-right:auto">O\'chirish</button>' : ''}<button class="btn ghost" id="fCancel">Bekor qilish</button><button class="btn" id="fSave">Saqlash</button></div>`);
+  $('#fDelete')?.addEventListener('click', async () => {
+    if (!confirm(`"${e.name}" o'chirilsinmi? Uning barcha statistikasi ham o'chadi va u amoCRM / OnlinePBX'dan qayta yuklanmaydi.\n(Statistikani saqlash uchun "Faol" belgisini olib tashlang.)`)) return;
+    try {
+      await api('/api/employees/' + e.id + '?purge=1', { method: 'DELETE' });
+      closeModal(); toast("O'chirildi"); RENDER[current]({ fresh: true });
+    } catch (err) { toast(err.message, true); }
+  });
   $('#phFile').addEventListener('change', async (ev) => {
     const f = ev.target.files[0];
     if (!f) return;
@@ -525,7 +685,7 @@ function employeeForm(e = null) {
     ev.target.disabled = true;
     try {
       await api(e ? '/api/employees/' + e.id : '/api/employees', { method: e ? 'PUT' : 'POST', body });
-      closeModal(); toast('Saqlandi ✓'); renderEmployees();
+      closeModal(); toast('Saqlandi ✓'); RENDER[current]({ fresh: true });
     } catch (err) { toast(err.message, true); ev.target.disabled = false; }
   });
 }
@@ -769,8 +929,8 @@ async function route() {
   const key = location.hash.replace(/^#\/?/, '').split('?')[0];
   current = VIEWS[key] || 'dashboard';
   $$('.nav-links a').forEach((a) => a.classList.toggle('active', a.dataset.view === current));
+  delete $('#view').dataset.dash;
   try {
-    if (current === 'dashboard' || current === 'rating') employeesCache = await api('/api/employees');
     await RENDER[current]();
   } catch (e) {
     $('#view').innerHTML = `<div class="panel"><h2>Xatolik</h2><p class="c-red">${esc(e.message)}</p></div>`;
@@ -788,17 +948,21 @@ setInterval(() => {
 }, 1000);
 refreshTimer = setInterval(() => {
   const menuOpen = $('#empMenu') && !$('#empMenu').hidden;
-  if ((current === 'dashboard' || current === 'rating') && !menuOpen && $('#modal').hidden && !ui.date) RENDER[current]().catch(() => {});
+  if ((current === 'dashboard' || current === 'rating') && !menuOpen && $('#modal').hidden && !ui.date && !editing()) RENDER[current]().catch(() => {});
 }, 60000);
 
-(async function init() {
-  try {
-    const me = token ? await api('/api/me') : {};
-    isAdmin = Boolean(me.admin); defaultPassword = Boolean(me.defaultPassword);
-  } catch { isAdmin = false; }
+(function init() {
   // "#/?tv" manzili — televizor uchun: sahifa darhol TV rejimda ochiladi
   if (/[?&]tv\b/.test(location.hash) || /[?&]tv\b/.test(location.search)) document.body.classList.add('tv');
-  if (!isAdmin && token) { token = ''; localStorage.removeItem('uzg.token'); }
+  // Sahifa kutmasdan chiziladi: token bor bo'lsa admin deb turamiz va fonda tekshiramiz
+  isAdmin = Boolean(token);
   updateAuthBtn();
   route();
+  if (!token) return;
+  api('/api/me').then((me) => {
+    defaultPassword = Boolean(me.defaultPassword);
+    if (me.admin) return;
+    token = ''; isAdmin = false; localStorage.removeItem('uzg.token');
+    updateAuthBtn(); route();
+  }).catch(() => {});
 })();
