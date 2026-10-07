@@ -128,8 +128,12 @@ Qadamlar:
    Kalitlar, xodimlar va statistika birga ko'chadi. Fayldan keyin parol kompyuterdagi parol bo'ladi
    (agar u Sozlamalarda o'zgartirilgan bo'lsa).
 
+Tezlik uchun Vercel funksiyasi ombor bilan bir hududda turishi kerak: `vercel.json` dagi `regions`
+Supabase loyihasi hududiga mos qo'yilgan (hozir Singapur — `sin1`). Supabase boshqa hududda bo'lsa,
+shu qatorni o'zgartiring (Frankfurt — `fra1`, Mumbay — `bom1`).
+
 Upstash Redis ishlatmoqchi bo'lsangiz: 2–4-qadamlar o'rniga Vercel → **Storage → Upstash for Redis**
-ni loyihaga ulang (`KV_REST_API_URL` va `KV_REST_API_TOKEN` o'zi qo'shiladi) va `ADMIN_PASSWORD` ni qo'ying.
+ni (funksiya bilan bir hududda) loyihaga ulang (`KV_REST_API_URL` va `KV_REST_API_TOKEN` o'zi qo'shiladi) va `ADMIN_PASSWORD` ni qo'ying.
 
 Eslatma: Vercel'dagi manzilni bilgan har kim doskani ko'ra oladi (ismlar va raqamlar). O'zgartirish
 uchun esa admin parol kerak. Kalit va tokenlar brauzerga hech qachon berilmaydi.

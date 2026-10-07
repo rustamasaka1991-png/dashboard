@@ -469,7 +469,14 @@ function serveStatic(req, res, url) {
   }
   // Vercel'da public/ fayllarini CDN beradi; funksiyaga faqat "/" keladi — uni index.html ga yo'naltiramiz
   if (db.SERVERLESS && p === '/') {
-    res.writeHead(302, { Location: '/index.html' + url.search, 'Cache-Control': 'no-store' });
+    // sahifaning o'zini beramiz (CDN keshlaydi); fayl funksiya ichida bo'lmasa — keshlanadigan yo'naltirish
+    const index = path.join(PUBLIC, 'index.html');
+    const cache = 'public, s-maxage=300, stale-while-revalidate=86400';
+    if (fs.existsSync(index)) {
+      res.writeHead(200, { 'Content-Type': TYPES['.html'], 'Cache-Control': cache });
+      return res.end(fs.readFileSync(index));
+    }
+    res.writeHead(302, { Location: '/index.html' + url.search, 'Cache-Control': cache });
     return res.end();
   }
   if (p === '/') p = '/index.html';
