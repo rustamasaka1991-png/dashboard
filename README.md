@@ -4,7 +4,13 @@ Sotuv menejerlarining kunlik / haftalik / oylik / yillik KPI natijalari va reyti
 
 - **Qo'ng'iroqlar** (real aloqa soni, suhbat vaqti) — **OnlinePBX**'dan avtomatik.
 - **Sotuvlar** (yutilgan bitimlar soni va summasi) — **amoCRM**'dan avtomatik (ixtiyoriy).
-- **Skript bali, konversiya, sotuv summasi** — "Natija kiritish" sahifasida qo'lda kiritiladi.
+- **Ustiga bosib tahrirlash** (admin kirgan bo'lsa): doskadagi plan, bonus, sarlavha, ish kuni va
+  xodimning kunlik natijasi (skript bali, konversiya, sotuv summasi va h.k.) ustiga bosiladi, yangi qiymat
+  yoziladi, Enter — saqlaydi, Esc — bekor qiladi. Xodim ustiga bosilsa — uning ma'lumotlari ochiladi.
+  Qo'lda kiritilgan qiymat yashil chiziq bilan belgilanadi; bo'shatib Enter bosilsa avtomatik qiymat qaytadi.
+  ("Natija kiritish" sahifasi ham qoladi — bir kunda hammaga birdan kiritish uchun.)
+- **Real aloqa** yonidagi "jami N" — o'sha xodim tergan barcha qo'ng'iroqlar (javobsiz va qisqalari bilan).
+  Hech kimga bog'lanmagan ichki raqamdan qo'ng'iroq bo'lsa, doska ostida ogohlantirish chiqadi.
   Qo'lda kiritilgan qiymat har doim avtomatik qiymatdan ustun.
 - **Xodimlar**: qo'shish, tahrirlash (rasm, ichki raqam, amoCRM ID), faolsizlantirish, o'chirish.
 - **Filtr**: Hafta / Oy / Yil / Oraliq, istalgan kun, xodimlar bo'yicha, KPI bo'yicha saralash.
