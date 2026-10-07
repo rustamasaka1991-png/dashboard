@@ -13,7 +13,8 @@ Sotuv menejerlarining kunlik / haftalik / oylik / yillik KPI natijalari va reyti
   Hech kimga bog'lanmagan ichki raqamdan qo'ng'iroq bo'lsa, doska ostida ogohlantirish chiqadi.
   Qo'lda kiritilgan qiymat har doim avtomatik qiymatdan ustun.
 - **Xodimlar**: qo'shish, tahrirlash (rasm, ichki raqam, amoCRM ID), faolsizlantirish, o'chirish.
-- **Filtr**: Hafta / Oy / Yil / Oraliq, istalgan kun, xodimlar bo'yicha, KPI bo'yicha saralash.
+- **Filtr**: Kun / Hafta / Oy / Yil / Oraliq, istalgan kun, xodimlar bo'yicha, KPI bo'yicha saralash.
+  "Kun" tanlansa doskada faqat o'sha kunning natijasi va plani ko'rinadi.
 - **Reyting**: KPI foizlaridan ball hisoblanadi, eng yaxshi xodim tepaga chiqadi (1-2-3 medallar,
   kunlik bonus g'oliblari, oy lideri, dinamika grafigi).
 - **TV rejim**: to'liq ekran, doska ekranga o'zi sig'adi, har daqiqada avtomatik yangilanadi.
@@ -73,8 +74,9 @@ hech qachon qaytarilmaydi.
 | Real aloqa | OnlinePBX: suhbat ≥ `minTalkSec` (default 30 s) bo'lgan qo'ng'iroqlar | yig'indi |
 | Suhbat vaqti | OnlinePBX: `user_talk_time` yig'indisi | yig'indi |
 | Skript bali | qo'lda | o'rtacha |
-| Konversiya | qo'lda, yoki "avto": sotuvlar soni / real aloqa | qo'lda: o'rtacha; avto: jami sotuv / jami aloqa |
-| Sotuv summasi | qo'lda yoki amoCRM yutilgan bitimlar byudjeti | yig'indi |
+| Konversiya | o'zi hisoblanadi: sotuvlar soni / real aloqa (qo'lda kiritilsa — o'sha) | qo'lda: o'rtacha; avto: jami sotuv / jami aloqa |
+| Sotuvlar soni | amoCRM: bitim sotuv bosqichiga ("yutildi", "to'lov qilingan", "sotildi") o'tgan kuni | yig'indi |
+| Sotuv summasi | amoCRM: sotuv bosqichiga o'tgan bitimlar byudjeti (kurs sozlamasiga bo'linadi), yoki qo'lda | yig'indi |
 
 Plan = kunlik plan × davrdagi ish kunlari (hafta = 6, oy = 24, yil = 24×12, oraliq = dam olish
 kunlaridan tashqari kunlar). Skript va konversiya plani davr uchun o'zgarmaydi.
@@ -84,7 +86,10 @@ o'rtasi), **rang va reyting bali** bugungi kungacha o'tgan ish kunlariga nisbata
 grafik bo'yicha ketayotgan xodim yashil ko'rinadi, 100 ball = reja bajarilmoqda. Chiziqdagi
 ingichka belgi — bugun qayerda bo'lish kerakligi.
 
+Ranglar foizga qarab silliq o'zgaradi: 0% — qizil, yarmi atrofida — sariq, 100% dan boshlab — yashil.
+
 Reyting bali = KPI bajarilish foizlarining og'irlikli o'rtachasi (har bir KPI maksimal 150%).
+To'liq izoh dasturning o'zida: Sozlamalar → "Reyting bali qanday hisoblanadi".
 Plani yoki og'irligi 0 qilingan KPI hisobga olinmaydi (ball va kunlik bonusda).
 Kunlik bonus: hisobga olinadigan barcha KPI bo'yicha kunlik planni ≥100% bajargan, ball bo'yicha 1-2-3 o'rin.
 Oylik bonus: oy davomida eng ko'p sotuv summasi.

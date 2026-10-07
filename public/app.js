@@ -7,8 +7,8 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 let tzOffsetH = 5; // kompaniya vaqt zonasi (serverdan keladi: TZ_OFFSET_HOURS)
 const MONTHS = ['YANVAR', 'FEVRAL', 'MART', 'APREL', 'MAY', 'IYUN', 'IYUL', 'AVGUST', 'SENTABR', 'OKTABR', 'NOYABR', 'DEKABR'];
 const WEEKDAYS = ['YAKSHANBA', 'DUSHANBA', 'SESHANBA', 'CHORSHANBA', 'PAYSHANBA', 'JUMA', 'SHANBA'];
-const PERIOD_LABEL = { week: 'HAFTALIK', month: 'OYLIK', year: 'YILLIK', custom: 'ORALIQ' };
-const PERIOD_BTN = { week: 'Hafta', month: 'Oy', year: 'Yil', custom: 'Oraliq' };
+const PERIOD_LABEL = { day: 'KUNLIK', week: 'HAFTALIK', month: 'OYLIK', year: 'YILLIK', custom: 'ORALIQ' };
+const PERIOD_BTN = { day: 'Kun', week: 'Hafta', month: 'Oy', year: 'Yil', custom: 'Oraliq' };
 
 let token = localStorage.getItem('uzg.token') || '';
 let isAdmin = false;
@@ -82,6 +82,8 @@ function fmtVal(k, v, cur) {
   return String(v);
 }
 const pctClass = (p) => (p >= 100 ? 'green' : p >= 65 ? 'orange' : 'red');
+// Foizga qarab silliq o'zgaradigan rang toni: 0% — qizil, ~50% — sariq, 100% va undan yuqori — yashil
+const hue = (p) => Math.round(2 + 128 * Math.pow(Math.max(0, Math.min(100, Number(p) || 0)) / 100, 1.25));
 const initials = (name) => String(name || '?').trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
 function avatar(e, cls = 'avatar') {
   return e.photo ? `<div class="${cls}"><img src="${esc(e.photo)}" alt=""></div>` : `<div class="${cls}">${esc(initials(e.name))}</div>`;
@@ -164,7 +166,57 @@ async function commitEdit({ ed: kind, key, type }, text) {
     return api('/api/entries', { method: 'POST', body: { date: lastDash.date, rows: [{ employeeId, [field]: v }] } });
   }
   if (v === '' && type === 'num') throw new Error('Qiymat kiriting');
+  if (kind === 'pplan') {
+    // davr plani kiritildi: yig'iladigan KPI'lar uchun kunlik plan = davr plani / ish kunlari
+    const daily = CUMULATIVE.includes(key) ? Math.round((Number(v) / (lastDash.workDays || 1)) * 100) / 100 : Number(v);
+    return api('/api/settings', { method: 'PUT', body: { plans: { [key]: daily } } });
+  }
   return api('/api/settings', { method: 'PUT', body: kind === 'plan' ? { plans: { [key]: v } } : { [key]: v } });
+}
+
+// Xodimning kunlar bo'yicha natijalari: davr qiymati ustiga bosilganda ochiladi, har bir kunni o'zgartirish mumkin
+const DAY_FIELDS = [
+  { k: 'calls', l: 'Real aloqa', auto: (x) => x.auto.calls },
+  { k: 'talkMin', l: 'Suhbat, min', auto: (x) => (x.auto.talkSec != null ? Math.round(x.auto.talkSec / 60) : undefined) },
+  { k: 'script', l: 'Skript' },
+  { k: 'conversion', l: 'Konversiya %', auto: (x) => (x.values.convAuto ? Math.round(x.values.conversion * 10) / 10 : undefined) },
+  { k: 'deals', l: 'Sotuvlar soni', auto: (x) => x.auto.deals },
+  { k: 'sales', l: 'Sotuv summasi', auto: (x) => (x.auto.sales != null ? Math.round(x.auto.sales) : undefined) },
+];
+async function openDays(empId) {
+  const d = lastDash;
+  // juda uzun davrda (yil) tanlangan kunning oyi ko'rsatiladi
+  let { from, to } = d.range;
+  if ((Date.parse(to) - Date.parse(from)) / 864e5 > 61) { from = d.date.slice(0, 8) + '01'; to = addDays(addDays(from, 32).slice(0, 8) + '01', -1); }
+  if (to > d.today) to = d.today;
+  if (from > to) return toast('Bu davr hali boshlanmagan', true);
+  let r;
+  try { r = await api(`/api/entries/range?employeeId=${empId}&from=${from}&to=${to}`); } catch (err) { return toast(err.message, true); }
+  const rows = r.days.slice().reverse().map((x) => `<tr data-date="${x.date}">
+    <td><b>${shortDate(x.date).slice(0, 5)}</b> <span class="hint">${WEEKDAYS[new Date(x.date + 'T00:00:00Z').getUTCDay()].slice(0, 3).toLowerCase()}</span></td>
+    ${DAY_FIELDS.map((f) => {
+      const a = f.auto ? f.auto(x) : undefined;
+      return `<td><input class="input" type="number" min="0" step="any" data-f="${f.k}" value="${x.manual[f.k] ?? ''}" placeholder="${a !== undefined && a !== null ? a : ''}"></td>`;
+    }).join('')}</tr>`).join('');
+  openModal(`<h2>${esc(r.employee.name)} — kunlar bo'yicha</h2>
+    <div class="hint" style="margin:-8px 0 10px">${shortDate(from)} — ${shortDate(to)}. Kulrang raqam — avtomatik kelgan qiymat. Katakka yozsangiz, o'sha kun uchun sizniki hisoblanadi; bo'shatsangiz avtomatik qiymat qaytadi.</div>
+    <div class="table-wrap days-wrap"><table class="tbl days"><thead><tr><th>Kun</th>${DAY_FIELDS.map((f) => `<th>${f.l}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="form-actions"><button class="btn ghost" id="dCancel">Yopish</button><button class="btn" id="dSave">Saqlash</button></div>`, 'wide');
+  $('#dCancel').addEventListener('click', closeModal);
+  $('#dSave').addEventListener('click', async (ev) => {
+    ev.target.disabled = true;
+    const out = $$('#modalBody tr[data-date]').map((tr) => {
+      const row = { employeeId: empId, date: tr.dataset.date };
+      $$('input', tr).forEach((i) => (row[i.dataset.f] = i.value));
+      return row;
+    });
+    try {
+      await api('/api/entries', { method: 'POST', body: { rows: out } });
+      closeModal();
+      await RENDER[current]({ fresh: true });
+      toast('Saqlandi ✓');
+    } catch (err) { toast(err.message, true); ev.target.disabled = false; }
+  });
 }
 
 function startEdit(el) {
@@ -212,7 +264,8 @@ $('#view').addEventListener('click', (e) => {
   if (!canEdit()) return;
   const el = e.target.closest('.ed');
   if (el) {
-    if (!el.classList.contains('editing')) startEdit(el);
+    if (el.dataset.days) openDays(el.dataset.days);
+    else if (!el.classList.contains('editing')) startEdit(el);
     return;
   }
   const emp = e.target.closest('[data-emp]');
@@ -226,12 +279,15 @@ const CUMULATIVE = ['calls', 'talkMin', 'sales'];
 // empId berilsa (xodimning kunlik qatori) — qiymat ustiga bosib qo'lda kiritish mumkin
 function mline(col, b, isPeriod, cur, pace = 1, empId = '') {
   const pct = b.pct[col.k] || 0;
-  const cls = pctClass(b.pacePct?.[col.k] ?? pct);
+  const h = hue(b.pacePct?.[col.k] ?? pct);
   const icon = col.k === 'sales' && !isPeriod ? ICON.coin : ICON[col.icon];
   const tick = isPeriod && pace > 0 && pace < 1 && CUMULATIVE.includes(col.k)
     ? `<u style="left:${(pace * 100).toFixed(1)}%" title="Bugungi kungacha reja: ${Math.round(pace * 100)}%"></u>` : '';
   let wrap;
-  if (empId) {
+  if (empId && isPeriod) {
+    // davr qiymati kunlardan yig'iladi — bosilganda shu xodimning kunlar bo'yicha jadvali ochiladi
+    wrap = (inner) => (canEdit() ? `<span class="ed" data-days="${empId}" title="Kunlar bo'yicha ko'rish va o'zgartirish">${inner}</span>` : inner);
+  } else if (empId) {
     const v = b.values[col.k];
     const manual = (b.manual || []).includes(col.k);
     const raw = v === null || v === undefined ? '' : col.k === 'conversion' ? Math.round(v * 10) / 10 : Math.round(v);
@@ -240,10 +296,10 @@ function mline(col, b, isPeriod, cur, pace = 1, empId = '') {
       title: manual ? "Qo'lda kiritilgan. Bosib o'zgartiring; bo'shatib Enter bossangiz avtomatik qiymat qaytadi" : "Bosib qo'lda kiriting",
     });
   }
-  return `<div class="mline">
+  return `<div class="mline" style="--h:${h}">
     <div class="lbl">${icon}${lineText(col.k, b, isPeriod, cur, wrap)}</div>
-    <div class="pct c-${cls}">${Math.round(pct)}%</div>
-    <div class="bar"><i class="b-${cls}" style="width:${Math.min(100, pct).toFixed(1)}%"></i>${tick}</div>
+    <div class="pct">${Math.round(pct)}%</div>
+    <div class="bar"><i style="width:${Math.min(100, pct).toFixed(1)}%"></i>${tick}</div>
   </div>`;
 }
 
@@ -271,7 +327,7 @@ function filtersHtml(d, { sort = true } = {}) {
       ${COLS.map((c) => `<option value="${c.k}" ${ui.sort === c.k ? 'selected' : ''}>Saralash: ${c.short.toLowerCase()}</option>`).join('')}
     </select>` : ''}
     <span class="grow"></span>
-    ${canEdit() ? '<span class="hint edit-hint">✎ Tahrirlash: raqam yoki yozuv ustiga bosing</span><button class="btn sm" id="addEmpBtn">+ Xodim</button>' : ''}
+    ${canEdit() ? '<span class="hint edit-hint">✎ Tahrirlash uchun ustiga bosing</span><button class="btn sm" id="addEmpBtn">+ Xodim</button>' : ''}
     <button class="btn ghost sm" id="refreshBtn">↻ Yangilash</button>
   </div>`;
 }
@@ -385,21 +441,29 @@ function boardHtml(d) {
     const v = d.plans.day[c.k];
     html += `<div class="cell plan-card">${ICON[c.icon]}<div class="txt"><div class="t">${c.title}</div><div class="v">${ed('plan', c.k, v, c.k === 'sales' ? money(v, cur) : c.planFmt(v), { title: "Kunlik planni o'zgartirish" })}</div><div class="s">${c.sub}</div></div></div>`;
   }
-  // Davr plani
-  html += `<div class="cell period-plan label">${ICON.users.replace('<svg', '<svg style="color:#1b7a3b"')}<div><b>${PL} PLAN</b> <small>(${d.workDays} kun)</small></div></div>`;
-  for (const c of COLS) {
-    const v = d.plans.period[c.k];
-    let txt;
-    if (c.k === 'talkMin') txt = `${intFmt(v)} minut<small>(${intFmt(v / 60)} soat)</small>`;
-    else if (c.k === 'script') txt = `Har kuni ≥${v} ball`;
-    else if (c.k === 'conversion') txt = `≥ ${v} %<small>(davr davomida)</small>`;
-    else if (c.k === 'sales') txt = money(v, cur);
-    else txt = `${intFmt(v)} ta`;
-    html += `<div class="cell period-plan">${ICON[c.icon].replace('<svg', '<svg style="color:#1b5e35"')}<div class="v ${c.k === 'script' ? 'sm' : ''}">${txt}</div></div>`;
+  // Davr plani (kunlik filtrda kerak emas — kunlik plan bilan bir xil)
+  const single = d.period === 'day';
+  if (!single) {
+    // ish kunlari soni: oy va hafta uchun sozlamadan (bosib o'zgartiriladi), oraliq uchun kalendardan
+    const wdKey = { month: 'workDaysPerMonth', week: 'workDaysPerWeek' }[d.period];
+    const wdTxt = wdKey ? ed('set', wdKey, d.workDays, `${d.workDays} kun`, { title: 'Ish kunlari sonini o\'zgartirish' }) : `${d.workDays} kun`;
+    html += `<div class="cell period-plan label">${ICON.users.replace('<svg', '<svg style="color:#1b7a3b"')}<div><b>${PL} PLAN</b> <small>(${wdTxt})</small></div></div>`;
+    for (const c of COLS) {
+      const v = d.plans.period[c.k];
+      // davr plani = kunlik plan × ish kunlari; bu yerda o'zgartirilsa, kunlik plan shunga mos qayta hisoblanadi
+      const e = (inner, raw = Math.round(v)) => ed('pplan', c.k, raw, inner, { title: `${PL.toLowerCase()} planni o'zgartirish (kunlik plan shunga mos o'zgaradi)` });
+      let txt;
+      if (c.k === 'talkMin') txt = `${e(`${intFmt(v)} minut`)}<small>(${intFmt(v / 60)} soat)</small>`;
+      else if (c.k === 'script') txt = `Har kuni ≥${e(v, v)} ball`;
+      else if (c.k === 'conversion') txt = `≥ ${e(`${v} %`, v)}<small>(davr davomida)</small>`;
+      else if (c.k === 'sales') txt = e(money(v, cur));
+      else txt = e(`${intFmt(v)} ta`);
+      html += `<div class="cell period-plan">${ICON[c.icon].replace('<svg', '<svg style="color:#1b5e35"')}<div class="v ${c.k === 'script' ? 'sm' : ''}">${txt}</div></div>`;
+    }
   }
   // Sarlavhalar
   html += `<div class="cell col-head">XODIM<small>Reyting: ${PL.toLowerCase()} ball</small></div>`;
-  for (const c of COLS) html += `<div class="cell col-head">${c.short}<small>↑ ${dayLbl.toLowerCase()} · ↓ ${PL.toLowerCase()} natija / plan</small></div>`;
+  for (const c of COLS) html += `<div class="cell col-head">${c.short}<small>${single ? `${dayLbl.toLowerCase()} natija / plan` : `↑ ${dayLbl.toLowerCase()} · ↓ ${PL.toLowerCase()} natija / plan`}</small></div>`;
 
   // Xodimlar
   const rows = [...d.rows];
@@ -411,12 +475,12 @@ function boardHtml(d) {
     const top = r.rank === 1 && r.score > 0;
     const edit = canEdit() ? ` clickable" data-emp="${r.id}" title="Xodimni tahrirlash (ism, rasm, ichki raqam)` : '';
     html += `<div class="cell emp ${top ? 'first' : ''}${edit}">${avatar(r)}<div class="nm"><b>${esc(r.name)}</b><small>${esc(r.role || '')}</small><span class="score">${Math.round(r.score)} ball · #${r.rank}</span></div>${r.rank <= 3 && r.score > 0 ? medal(r.rank) : ''}</div>`;
-    for (const c of COLS) html += `<div class="cell metric ${top ? 'first' : ''}">${mline(c, r.day, false, cur, 1, r.id)}${mline(c, r.period, true, cur, d.pace)}</div>`;
+    for (const c of COLS) html += `<div class="cell metric ${top ? 'first' : ''} ${single ? 'one' : ''}">${mline(c, r.day, false, cur, 1, r.id)}${single ? '' : mline(c, r.period, true, cur, d.pace, r.id)}</div>`;
   }
   // Jami
   if (rows.length) {
     html += `<div class="cell total emp">${ICON.users}<div><b>JAMI NATIJA</b><small>(${d.totals.count} XODIM)</small></div></div>`;
-    for (const c of COLS) html += `<div class="cell total metric">${mline(c, d.totals.day, false, cur)}${mline(c, d.totals.period, true, cur, d.pace)}</div>`;
+    for (const c of COLS) html += `<div class="cell total metric ${single ? 'one' : ''}">${mline(c, d.totals.day, false, cur)}${single ? '' : mline(c, d.totals.period, true, cur, d.pace)}</div>`;
   }
   html += '</div></div>';
   return html;
@@ -515,12 +579,12 @@ function paintRating(d, tag) {
 
   const rows = d.rows.map((r) => {
     const sc = Math.round(r.score);
-    const cell = (k) => `<td class="num">${fmtVal(k, r.period.values[k], cur)}<span class="pctxt c-${pctClass(r.period.pacePct[k])}">${Math.round(r.period.pct[k])}%</span></td>`;
+    const cell = (k) => `<td class="num">${fmtVal(k, r.period.values[k], cur)}<span class="pctxt" style="--h:${hue(r.period.pacePct[k])}">${Math.round(r.period.pct[k])}%</span></td>`;
     const bonus = d.dailyBonus.findIndex((w) => w.id === r.id);
     return `<tr>
       <td><span class="rank-badge ${r.rank <= 3 && r.score > 0 ? 'r' + r.rank : ''}">${r.rank}</span></td>
       <td>${avatar(r, 'mini-av')}<b>${esc(r.name)}</b>${bonus >= 0 ? ` <span class="chip">Kunlik bonus ${bonus + 1}-o'rin</span>` : ''}${d.monthLeader?.id === r.id ? ' <span class="chip">👑 Oy lideri</span>' : ''}</td>
-      <td><b>${sc}</b><span class="scorebar"><i class="b-${pctClass(r.score)}" style="width:${Math.min(100, (r.score / (s.scoreCap || 150)) * 100)}%"></i></span></td>
+      <td><b>${sc}</b><span class="scorebar" style="--h:${hue(r.score)}"><i style="width:${Math.min(100, (r.score / (s.scoreCap || 150)) * 100)}%"></i></span></td>
       ${cell('calls')}${cell('talkMin')}${cell('script')}${cell('conversion')}${cell('sales')}
       <td>${spark(r.trend, 100)}</td>
     </tr>`;
@@ -721,7 +785,16 @@ async function renderSettings() {
       <label class="field">Kichik sarlavha${txt('subtitle', s.subtitle)}</label>
       <label class="field">Valyuta belgisi${txt('currency', s.currency)}</label>
     </div>
-    <h3>Reyting hisoblash</h3>
+    <h3>Reyting bali qanday hisoblanadi</h3>
+    <div class="explain">
+      <p><b>1. Har bir KPI bo'yicha foiz</b> = natija ÷ plan × 100. Masalan, plan 70 ta real aloqa, xodim 56 ta qilgan bo'lsa — 80%.</p>
+      <p><b>2. Chegara.</b> Bitta KPI eng ko'pi bilan <b>${s.scoreCap}%</b> hisoblanadi — bitta ko'rsatkichni juda oshirib yuborish qolganlarini yopib ketmasligi uchun.</p>
+      <p><b>3. Ball</b> = shu foizlarning og'irlikka qarab o'rtachasi. Hozirgi og'irliklar: ${Object.entries(kpiNames).map(([k, l]) => `${l.replace(/ \(.*\)/, '')} — <b>${s.weights[k]}</b>`).join(', ')}. Og'irliklar teng bo'lsa, ball — beshta foizning oddiy o'rtachasi. Og'irligi yoki plani 0 qilingan KPI hisobga kirmaydi.</p>
+      <p><b>4. Davr tugamagan bo'lsa</b> (hafta, oy, yil o'rtasi), yig'iladigan KPI'lar (real aloqa, suhbat vaqti, sotuv summasi) to'liq davr planiga emas, <b>bugungacha o'tgan ish kunlari</b> ulushiga solishtiriladi. Shuning uchun <b>100 ball = xodim rejadan qolmayapti</b>, 100 dan yuqori — rejadan oldinda. Skript bali va konversiya — davr bo'yicha o'rtacha, ular to'g'ridan-to'g'ri planga solishtiriladi.</p>
+      <p><b>5. O'rinlar.</b> Bali yuqori xodim tepada turadi; ballar teng bo'lsa — sotuv summasi ko'pi. <b>Kunlik bonus</b>: hisobga olinadigan barcha KPI bo'yicha kunlik planni 100% bajarganlar ichidan ball bo'yicha 1-2-3 o'rin. <b>Oylik bonus</b>: oy davomida eng ko'p sotuv summasi.</p>
+      <p><b>Ranglar</b> foizga qarab silliq o'zgaradi: 0% — qizil, yarmi atrofida — sariq, 100% va undan yuqori — yashil.</p>
+      <p class="hint">Misol: real aloqa 80%, suhbat 100%, skript 110%, konversiya 50%, sotuv 60% va og'irliklar teng bo'lsa — ball = (80 + 100 + 110 + 50 + 60) ÷ 5 = <b>80</b>.</p>
+    </div>
     <div class="grid-form">${Object.entries(kpiNames).map(([k, l]) => `<label class="field">Og'irlik: ${l.replace(/ \(.*\)/, '')}${num('w_' + k, s.weights[k])}</label>`).join('')}
       <label class="field">Bitta KPI uchun maks. foiz${num('scoreCap', s.scoreCap)}</label></div>
     <h3>Hisoblash qoidalari</h3>
@@ -758,6 +831,8 @@ async function renderSettings() {
       <label class="field">Uzoq muddatli token ${s.amo.hasToken ? `(saqlangan ✓${s.amo.tokenExpires ? ', ' + shortDate(localParts(s.amo.tokenExpires * 1000).date) + ' gacha' : ''})` : ''}<input class="input" type="password" id="amoToken" placeholder="${s.amo.hasToken ? '•••••• (o\'zgartirish uchun yangisini kiriting)' : 'token'}" autocomplete="off"></label>
       <label class="field">Voronka ID (ixtiyoriy)${txt('amoPipe', s.amo.pipelineId, 'hammasi')}</label>
       <label class="field">"Yutildi" status ID${num('amoWon', s.amo.wonStatusId, 1)}</label>
+      <label class="field">Sotuv bosqichlari ID (bo'sh — avtomatik)${txt('amoWonIds', (s.amo.wonStatusIds || []).join(', '), 'avtomatik')}<span class="hint">Bitim shu bosqichga o'tganda sotuv hisoblanadi. Bo'sh qolsa: "yutildi" + nomi "to'lov qilingan / sotildi" bo'lgan bosqichlar.</span></label>
+      <label class="field">Byudjetni bo'lish (kurs)${num('amoDiv', s.amo.priceDivisor)}<span class="hint">Bitim byudjeti so'mda, doska esa ${esc(s.currency)} da bo'lsa — kursni yozing (masalan 12800). Bir xil valyutada bo'lsa 1.</span></label>
     </div>
     <div class="form-actions"><button class="btn ghost" id="testAmo">amoCRM'ni tekshirish</button><button class="btn" id="saveAmo">Saqlash</button></div>
     <div id="amoResult"></div>
@@ -833,7 +908,7 @@ async function renderSettings() {
     scoreCap: n('scoreCap'), minTalkSec: n('minTalkSec'), callDirection: n('callDirection'), conversionSource: n('conversionSource'), syncMinutes: n('syncMinutes'),
   }));
   const pbxBody = () => ({ pbx: { domain: n('pbxDomain'), apiKey: n('pbxKey'), baseUrl: n('pbxBase') } });
-  const amoBody = () => ({ amo: { subdomain: n('amoSub'), baseDomain: n('amoBase'), token: n('amoToken'), pipelineId: n('amoPipe'), wonStatusId: n('amoWon') } });
+  const amoBody = () => ({ amo: { subdomain: n('amoSub'), baseDomain: n('amoBase'), token: n('amoToken'), pipelineId: n('amoPipe'), wonStatusId: n('amoWon'), wonStatusIds: n('amoWonIds'), priceDivisor: n('amoDiv') } });
   $('#savePbx').addEventListener('click', () => saveSettings(pbxBody()));
   $('#saveAmo').addEventListener('click', () => saveSettings(amoBody()));
 
@@ -852,6 +927,7 @@ async function renderSettings() {
     const saved = await api('/api/settings');
     $('#amoSub').value = saved.amo.subdomain; $('#amoBase').value = saved.amo.baseDomain; $('#amoToken').value = '';
     $('#amoResult').innerHTML = `<p class="c-green"><b>✓ Ulandi.</b></p>
+      <p class="hint" style="font-size:13px"><b>Sotuv deb hisoblanayotgan bosqichlar:</b> ${(r.won || []).map((w) => `${esc(w.name)} (${w.statusId})`).join(' · ') || '—'}<br>Bitim shu bosqichlardan biriga o'tgan kuni mas'ul xodimga 1 ta sotuv va bitim byudjeti yoziladi. Konversiya = sotuvlar soni ÷ real aloqa.</p>
       <h3>Foydalanuvchilar (ID → Xodimlar bo'limiga yozing)</h3>
       <div class="table-wrap"><table class="tbl" style="min-width:0"><tr><th>ID</th><th>Ism</th><th>Email</th></tr>${r.users.map((u) => `<tr><td><b>${u.id}</b></td><td>${esc(u.name)}</td><td>${esc(u.email || '')}</td></tr>`).join('')}</table></div>
       <h3>Voronkalar</h3>
@@ -875,7 +951,11 @@ async function withBtn(btn, fn, resultSel) {
 }
 
 /* ================= modal / auth ================= */
-function openModal(html) { $('#modalBody').innerHTML = html; $('#modal').hidden = false; }
+function openModal(html, size = '') {
+  $('#modalBody').innerHTML = html;
+  $('.modal-card').classList.toggle('wide', size === 'wide');
+  $('#modal').hidden = false;
+}
 function closeModal() { $('#modal').hidden = true; $('#modalBody').innerHTML = ''; }
 $('#modalX').addEventListener('click', closeModal);
 $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') closeModal(); });

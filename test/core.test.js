@@ -24,6 +24,7 @@ test("qo'lda kiritilgan qiymat avtomatikdan ustun", () => {
   const e = state.employees[0];
   state.auto['2026-10-05'] = { [e.id]: { calls: 50, talkSec: 6000, deals: 1, sales: 500 } };
   state.entries['2026-10-05'] = { [e.id]: { sales: 1250, script: 80 } };
+  state.settings.conversionSource = 'manual';
   const v = stats.dayValues(state, '2026-10-05', e.id);
   assert.strictEqual(v.calls, 50);
   assert.strictEqual(v.talkMin, 100);
@@ -127,6 +128,42 @@ test('amoCRM: token ichidagi domen va subdomenni avtomatik aniqlash (mock)', asy
     assert.strictEqual(seen.auth, 'Bearer ' + token);
     global.fetch = async () => ({ status: 401, ok: false, text: async () => '{}' });
     await assert.rejects(amo.detectSubdomain(settings), /token noto'g'ri/);
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test("amoCRM sotuvlari: sotuv bosqichiga birinchi o'tish sanaladi (mock)", async () => {
+  const amo = require('../lib/amo');
+  const settings = { amo: { subdomain: 'sotuvtest', token: 'tok-' + Date.now(), baseDomain: 'amocrm.ru', wonStatusId: 142, wonStatusIds: [] } };
+  const ev = (lead, before, after, at) => ({ entity_id: lead, created_at: at, value_before: [{ lead_status: { id: before, pipeline_id: 1 } }], value_after: [{ lead_status: { id: after, pipeline_id: 1 } }] });
+  const realFetch = global.fetch;
+  const urls = [];
+  global.fetch = async (url) => {
+    urls.push(decodeURIComponent(url));
+    let body;
+    if (url.includes('/leads/pipelines')) {
+      body = { _embedded: { pipelines: [{ id: 1, name: 'Asosiy', _embedded: { statuses: [{ id: 10, name: 'Yangi' }, { id: 20, name: "To'lov qilingan" }, { id: 142, name: 'Muvaffaqiyatli' }, { id: 143, name: 'Yopildi' }] } }] } };
+    } else if (url.includes('/api/v4/events')) {
+      body = { _embedded: { events: [
+        ev(501, 10, 20, 1000), // sotuv
+        ev(501, 20, 142, 2000), // o'sha bitim to'lovdan yutildiga — qayta sanalmaydi
+        ev(502, 10, 142, 3000), // sotuv
+        ev(503, 10, 143, 4000), // yo'qotilgan — sotuv emas
+      ] } };
+    } else {
+      body = { _embedded: { leads: [{ id: 501, price: 1500, responsible_user_id: 7 }, { id: 502, price: 0, responsible_user_id: 8 }] } };
+    }
+    return { status: 200, ok: true, text: async () => JSON.stringify(body) };
+  };
+  try {
+    assert.deepStrictEqual((await amo.wonStatuses(settings)).map((w) => w.statusId), [20, 142]);
+    const list = await amo.sales(settings, 0, 10000);
+    assert.deepStrictEqual(list, [{ id: 501, price: 1500, userId: '7', at: 1000 }, { id: 502, price: 0, userId: '8', at: 3000 }]);
+    assert.ok(urls.some((u) => u.includes('filter[value_after][leads_statuses][1][status_id]=142')));
+    // ro'yxat qo'lda berilsa — faqat o'sha bosqichlar
+    settings.amo.wonStatusIds = [142];
+    assert.deepStrictEqual((await amo.wonStatuses(settings)).map((w) => w.statusId), [142]);
   } finally {
     global.fetch = realFetch;
   }

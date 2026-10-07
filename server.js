@@ -169,6 +169,7 @@ function publicSettings(settings) {
   };
   s.amo = {
     subdomain: a.subdomain, baseDomain: a.baseDomain, pipelineId: a.pipelineId, wonStatusId: a.wonStatusId,
+    wonStatusIds: (settings.amo?.wonStatusIds || []).map(Number).filter(Boolean), priceDivisor: Number(settings.amo?.priceDivisor) || 1,
     token: '', hasToken: Boolean(a.token), tokenExpires: a.token ? amo.tokenInfo(a.token)?.exp || 0 : 0, fromEnv: Boolean(process.env.AMO_TOKEN || process.env.AMO_SUBDOMAIN),
   };
   return s;
@@ -224,6 +225,12 @@ function applySettings(current, body) {
     if (body.amo.pipelineId !== undefined) s.amo.pipelineId = str(body.amo.pipelineId, 30);
     const ws = optNum(body.amo.wonStatusId);
     if (ws) s.amo.wonStatusId = ws;
+    if (body.amo.wonStatusIds !== undefined) {
+      const list = Array.isArray(body.amo.wonStatusIds) ? body.amo.wonStatusIds : String(body.amo.wonStatusIds).split(/[,\s;]+/);
+      s.amo.wonStatusIds = [...new Set(list.map(Number).filter((n) => Number.isInteger(n) && n > 0))].slice(0, 30);
+    }
+    const div = optNum(body.amo.priceDivisor);
+    if (div !== undefined && div > 0) s.amo.priceDivisor = div;
     if (body.amo.token) {
       s.amo.token = str(body.amo.token, 4000).replace(/^Bearer\s+/i, '');
       // Token qaysi domenga tegishli ekanini o'zi biladi (amocrm.ru / amocrm.com / kommo.com)
@@ -379,24 +386,44 @@ async function api(req, res, url) {
       })),
     });
   }
+  // Bitta xodimning kunlar bo'yicha natijalari (davr qiymati ustiga bosilganda ochiladigan jadval uchun)
+  if (route === 'GET /api/entries/range') {
+    requireAdmin(req);
+    const e = state.employees.find((x) => x.id === q.employeeId);
+    if (!e) throw new HttpError(404, 'Xodim topilmadi');
+    if (!D.isDate(q.from) || !D.isDate(q.to) || q.from > q.to) throw new HttpError(400, 'Oraliq noto\'g\'ri');
+    if (D.daysBetween(q.from, q.to) > 62) throw new HttpError(400, 'Maksimal oraliq 62 kun');
+    return send(res, 200, {
+      employee: { id: e.id, name: e.name },
+      days: D.eachDay(q.from, q.to).map((date) => ({
+        date,
+        manual: state.entries[date]?.[e.id] || {},
+        auto: state.auto[date]?.[e.id] || {},
+        values: stats.dayValues(state, date, e.id),
+      })),
+    });
+  }
   if (route === 'POST /api/entries') {
     requireAdmin(req);
     const body = await readBody(req);
-    if (!D.isDate(body.date)) throw new HttpError(400, 'Sana noto\'g\'ri');
+    // sana umumiy (body.date) yoki har bir qatorda alohida (row.date) berilishi mumkin
+    if (body.date !== undefined && !D.isDate(body.date)) throw new HttpError(400, 'Sana noto\'g\'ri');
     const fields = ['script', 'conversion', 'sales', 'deals', 'calls', 'talkMin'];
     for (const row of Array.isArray(body.rows) ? body.rows : []) {
       if (!row || typeof row !== 'object') continue;
       if (!state.employees.some((e) => e.id === row.employeeId)) continue;
-      const cur = { ...(state.entries[body.date]?.[row.employeeId] || {}) };
+      const date = row.date !== undefined ? row.date : body.date;
+      if (!D.isDate(date)) throw new HttpError(400, 'Sana noto\'g\'ri');
+      const cur = { ...(state.entries[date]?.[row.employeeId] || {}) };
       for (const f of fields) {
         if (!(f in row)) continue;
         const v = optNum(row[f]);
         if (v === undefined || v < 0) delete cur[f];
         else cur[f] = v;
       }
-      state.entries[body.date] ??= {};
-      if (Object.keys(cur).length) state.entries[body.date][row.employeeId] = cur;
-      else delete state.entries[body.date][row.employeeId];
+      state.entries[date] ??= {};
+      if (Object.keys(cur).length) state.entries[date][row.employeeId] = cur;
+      else delete state.entries[date][row.employeeId];
     }
     db.saveNow('entries');
     return send(res, 200, { ok: true });
@@ -451,7 +478,8 @@ async function api(req, res, url) {
     requireAdmin(req);
     await ensureAmoSubdomain(state);
     const [users, pipelines] = await Promise.all([amo.users(state.settings), amo.pipelines(state.settings)]);
-    return send(res, 200, { ok: true, users, pipelines });
+    const won = await amo.wonStatuses(state.settings).catch(() => []);
+    return send(res, 200, { ok: true, users, pipelines, won });
   }
 
   throw new HttpError(404, 'Topilmadi');

@@ -310,3 +310,31 @@ pre.code { background: rgba(0,0,0,0.4); border: 1px solid var(--line-soft); bord
 .total .mline .lbl em { color: var(--muted); }
 .footnote.warn { color: #ffcf7a; background: rgba(245, 165, 36, 0.12); border: 1px solid rgba(245, 165, 36, 0.4); border-radius: 8px; padding: 7px 10px; display: block; }
 body.tv .edit-hint { display: none; }
+
+/* ---------- foizga qarab silliq rang (--h: 0 qizil … 130 yashil) ---------- */
+.mline .pct { color: hsl(var(--h, 0) 82% 35%); }
+.mline .bar i { background: linear-gradient(90deg, hsl(var(--h, 0) 88% 54%), hsl(var(--h, 0) 82% 42%)); transition: width 0.4s ease, background 0.4s ease; }
+.total .mline .pct { color: hsl(var(--h, 0) 90% 62%); }
+.pctxt { color: hsl(var(--h, 0) 90% 62%); }
+.scorebar i { background: hsl(var(--h, 0) 85% 48%); }
+
+/* ---------- kunlik filtr: bitta qator, yirikroq ---------- */
+.metric.one { padding-top: 14px; padding-bottom: 14px; }
+.metric.one .mline .lbl { font-size: 15px; }
+.metric.one .mline .pct { font-size: 19px; }
+.metric.one .bar { height: 14px; }
+
+/* ---------- kunlar bo'yicha jadval, izohlar ---------- */
+.modal-card.wide { width: min(880px, 100%); }
+.days-wrap { max-height: 58vh; overflow: auto; }
+table.days { min-width: 640px; }
+table.days th { position: sticky; top: 0; background: #06200f; z-index: 1; }
+table.days td { padding: 4px 5px; }
+table.days td .input { padding: 5px 7px; }
+table.days input::placeholder { color: #7fa08c; }
+.explain { background: rgba(0, 0, 0, 0.22); border: 1px solid var(--line-soft); border-radius: 10px; padding: 4px 14px; margin-bottom: 12px; font-size: 13px; line-height: 1.55; }
+.explain p { margin: 9px 0; }
+
+/* tahrirlanadigan sarlavha o'ramida rang buzilmasin: faqat oxirgi so'z yashil */
+.title h1 > span.ed { color: var(--text); }
+.title h1 > span.ed > span { color: var(--green); }
